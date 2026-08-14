@@ -24,11 +24,17 @@ class StaticSecurityTests(unittest.TestCase):
         self.assertIn("BW_VERSION=2026.7.0", installer)
         self.assertNotIn("/latest/", installer)
 
-    def test_default_server_is_recorded(self):
-        self.assertIn(
-            'DEFAULT_SERVER = "https://vaultwarden.example.com/"',
-            (ROOT / "geheim.py").read_text(),
-        )
+    def test_private_defaults_are_not_recorded(self):
+        private_fragments = ("ta" + "yra", ".ts" + ".net")
+        files = [path for path in ROOT.rglob("*") if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts]
+        for path in files:
+            text = path.read_text(errors="ignore")
+            for fragment in private_fragments:
+                self.assertNotIn(fragment, text, str(path.relative_to(ROOT)))
+
+    def test_setup_has_no_default_server(self):
+        source = (ROOT / "geheim.py").read_text()
+        self.assertNotIn("DEFAULT_SERVER", source)
 
 
 if __name__ == "__main__":

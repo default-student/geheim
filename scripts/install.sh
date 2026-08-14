@@ -12,6 +12,25 @@ PROGRAM_DIR="${LIB_DIR}/app"
 NETWORK_DIR="${LIB_DIR}/network"
 BW_DATA_DIR="${HOME}/.local/share/geheim/bw-data"
 
+for command in curl sha256sum unzip; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        echo "install.sh: missing required command: $command" >&2
+        exit 1
+    fi
+done
+
+for command in bwrap python3 tailscale; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        echo "install.sh: missing required command: $command" >&2
+        exit 1
+    fi
+done
+
+if ! command -v pinentry-gnome3 >/dev/null 2>&1 && ! command -v pinentry >/dev/null 2>&1; then
+    echo "install.sh: missing required command: pinentry-gnome3 or pinentry" >&2
+    exit 1
+fi
+
 tmp_dir=$(mktemp -d)
 trap 'rm -rf -- "$tmp_dir"' EXIT HUP INT TERM
 

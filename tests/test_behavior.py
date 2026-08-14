@@ -71,7 +71,7 @@ class BehaviorTests(unittest.TestCase):
         FakeVault.instances.clear()
         self.config = geheim.Config(
             email="codex@example.invalid",
-            server=geheim.SERVER,
+            server="https://vault.example/",
             bw_path=Path("/does/not/matter"),
             bw_data_dir=Path("/does/not/matter"),
             pinentry_path=Path("/does/not/matter"),
@@ -167,7 +167,7 @@ class BehaviorTests(unittest.TestCase):
             root = Path(directory)
             config = geheim.Config(
                 email="codex@example.invalid",
-                server=geheim.SERVER,
+                server="https://vault.example/",
                 bw_path=root / "bw",
                 bw_data_dir=root / "data",
                 pinentry_path=Path("/usr/bin/pinentry-gnome3"),
@@ -192,13 +192,38 @@ class BehaviorTests(unittest.TestCase):
     def test_existing_setup_reports_remote_server(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.toml"
-            config_path.touch()
-            with self.assertRaisesRegex(geheim.GeheimError, re.escape(geheim.SERVER)):
+            config = geheim.Config(
+                email="codex@example.invalid",
+                server="https://vault.example/",
+                bw_path=Path("/tmp/bw"),
+                bw_data_dir=Path(directory) / "bw-data",
+                pinentry_path=Path("/tmp/pinentry"),
+                bw_version=geheim.BW_VERSION,
+            )
+            geheim.write_config(config, config_path)
+            with self.assertRaisesRegex(geheim.GeheimError, "https://vault.example/"):
+                geheim.command_setup("codex@example.invalid", False, None, config_path)
+
+    def test_new_setup_requires_url(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            with self.assertRaisesRegex(geheim.GeheimError, "--url"):
                 geheim.command_setup("codex@example.invalid", False, None, config_path)
 
     def test_url_change_requires_replace_and_https(self):
-        with self.assertRaisesRegex(geheim.GeheimError, "--replace"):
-            geheim.command_setup("codex@example.invalid", False, "https://vault.example/", Path("unused"))
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config = geheim.Config(
+                email="codex@example.invalid",
+                server="https://vault.example/",
+                bw_path=Path("/tmp/bw"),
+                bw_data_dir=Path(directory) / "bw-data",
+                pinentry_path=Path("/tmp/pinentry"),
+                bw_version=geheim.BW_VERSION,
+            )
+            geheim.write_config(config, config_path)
+            with self.assertRaisesRegex(geheim.GeheimError, "--replace"):
+                geheim.command_setup("codex@example.invalid", False, "https://other-vault.example/", config_path)
         with self.assertRaises(geheim.GeheimError):
             geheim.normalize_server_url("http://vault.example/")
         self.assertEqual(

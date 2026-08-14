@@ -27,17 +27,27 @@ in argv, files, the caller environment, or wrapper output.
 - Runner: `~/.local/lib/geheim/app/geheim`
 - Command: `~/.local/bin/geheim`
 
-The default dedicated Vaultwarden server is
-`https://vaultwarden.example.com/`.
+## Requirements
 
-Change the configured server deliberately with:
+This installer targets x86-64 Linux. It expects `curl`, `sha256sum`, `unzip`,
+`bwrap`, `python3`, `tailscale`, and either `pinentry-gnome3` or `pinentry`.
+The configured Vaultwarden host must be reachable through `tailscale nc` on
+port 443.
+
+Configure the dedicated Vaultwarden server explicitly during setup:
+
+```bash
+geheim setup --email USER --url https://vaultwarden.example.com/
+```
+
+For an existing configuration, changing the server requires `--replace`:
 
 ```bash
 geheim setup --email USER --replace --url https://vaultwarden.example.com/
 ```
 
-`--url` requires `--replace`, HTTPS, and port 443. The selected hostname becomes
-the sole network destination allowed to the secret-retrieval component.
+`--url` requires HTTPS and port 443. The selected hostname becomes the sole
+network destination allowed to the secret-retrieval component.
 
 The installed CLI is the official x86-64 Linux archive from the Bitwarden
 `cli-v2026.7.0` GitHub release. Its pinned SHA-256 digest is
@@ -85,9 +95,9 @@ identity and broker. This implementation does not claim protection from a
 malicious same-user Codex process.
 
 Each `bw` process runs in a Bubblewrap user and network namespace with no
-network interfaces. Inside that namespace, the Vaultwarden hostname resolves
-only to a loopback relay. The relay has one hard-coded destination,
-`vaultwarden.example.com:443`, and reaches it through the local Tailscale
-daemon's Unix socket using `tailscale nc`. No DNS or general IP connectivity is
-available to `bw`. This isolation does not wrap or alter the command launched
-by `geheim run`.
+network interfaces. Inside that namespace, the configured Vaultwarden hostname
+resolves only to a loopback relay. The relay has one configured destination,
+the configured Vaultwarden hostname on port 443, and reaches it through the
+local Tailscale daemon's Unix socket using `tailscale nc`. No DNS or general IP
+connectivity is available to `bw`. This isolation does not wrap or alter the
+command launched by `geheim run`.

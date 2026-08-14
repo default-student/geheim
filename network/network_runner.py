@@ -7,6 +7,7 @@ import os
 import argparse
 from pathlib import Path
 import selectors
+import shutil
 import signal
 import socketserver
 import subprocess
@@ -16,7 +17,7 @@ import urllib.request
 
 
 TARGET_PORT = "443"
-TAILSCALE = "/usr/bin/tailscale"
+TAILSCALE = os.environ.get("GEHEIM_TAILSCALE") or shutil.which("tailscale") or "/usr/bin/tailscale"
 BW_VERSION = "2026.7.0"
 
 

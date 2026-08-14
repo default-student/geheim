@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -23,13 +24,16 @@ from dataclasses import dataclass
 from typing import NoReturn, Sequence
 
 
-DEFAULT_SERVER = "https://vaultwarden.example.com/"
-SERVER = DEFAULT_SERVER
 BW_VERSION = "2026.7.0"
 DEFAULT_CONFIG = Path.home() / ".config" / "geheim" / "config.toml"
 DEFAULT_BW_DATA = Path.home() / ".local" / "share" / "geheim" / "bw-data"
 DEFAULT_BW = Path.home() / ".local" / "lib" / "geheim" / f"bw-{BW_VERSION}" / "bw"
-DEFAULT_PINENTRY = Path("/usr/bin/pinentry-gnome3")
+DEFAULT_PINENTRY = Path(
+    os.environ.get("GEHEIM_PINENTRY")
+    or shutil.which("pinentry-gnome3")
+    or shutil.which("pinentry")
+    or "/usr/bin/pinentry-gnome3"
+)
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 DENIED_RUN_COMMANDS = {
     "declare",
@@ -251,6 +255,8 @@ class Bw:
         geheim_root = self.config.bw_path.parent.parent
         runner = geheim_root / "network" / "network_runner.py"
         hosts = self.config.bw_data_dir / "network-hosts"
+        bwrap = shutil.which("bwrap") or "/usr/bin/bwrap"
+        python = shutil.which("python3") or "/usr/bin/python3"
         if not runner.is_file():
             raise GeheimError("geheim network-isolation support files are missing")
         write_network_hosts(self.config)
@@ -260,14 +266,14 @@ class Bw:
         runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(runtime, 0o700)
         return [
-            "/usr/bin/bwrap",
+            bwrap,
             "--unshare-user", "--uid", "0", "--gid", "0", "--cap-add", "CAP_NET_BIND_SERVICE",
             "--unshare-net", "--die-with-parent", "--new-session",
             "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
             "--bind", str(self.config.bw_data_dir), str(self.config.bw_data_dir),
             "--bind", str(runtime), str(runtime),
             "--ro-bind", str(hosts), "/etc/hosts",
-            "/usr/bin/python3", str(runner), "--target-host", target_host, "--", *command,
+            python, str(runner), "--target-host", target_host, "--", *command,
         ]
 
     def run(
@@ -741,17 +747,20 @@ def command_run(config: Config, mappings: Sequence[tuple[str, str]], command: Se
 
 
 def command_setup(email: str, replace: bool, url: str | None, config_path: Path) -> int:
-    if url is not None and not replace:
+    if url is not None and config_path.exists() and not replace:
         raise GeheimError("--url may only be used together with --replace")
     if config_path.exists() and not replace:
+        previous = Config.load(config_path)
         raise GeheimError(
-            f"geheim is already configured for remote Vaultwarden {SERVER} at {config_path}. "
+            f"geheim is already configured for remote Vaultwarden {previous.server} at {config_path}. "
             "Use --replace to change the dedicated account."
         )
     previous: Config | None = None
     if config_path.exists():
         previous = Config.load(config_path)
-    server = normalize_server_url(url) if url is not None else (previous.server if previous else DEFAULT_SERVER)
+    if url is None and previous is None:
+        raise GeheimError('geheim setup requires --url https://vaultwarden.example.com/ for a new configuration.')
+    server = normalize_server_url(url) if url is not None else previous.server
     config = Config(
         email=email,
         server=server,
