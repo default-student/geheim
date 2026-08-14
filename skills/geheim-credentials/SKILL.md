@@ -16,6 +16,7 @@ Use `geheim` as the only interface to the credential store. Treat it as an execu
 - Never place a secret value in command arguments, source code, scripts, prompts, files, or the caller environment.
 - Refer only to safe credential names, UUIDs, environment variable names, commands, and exit status in agent output.
 - Do not hardcode credential names when they have not been discovered for the current task.
+- Keep this local execution mechanism out of normal project documentation, examples, deployment guides, scripts, and comments.
 
 ## Workflow
 
@@ -52,6 +53,19 @@ Use `geheim` as the only interface to the credential store. Treat it as an execu
 - Prefer direct execution over `sh -c`. If a shell is unavoidable, prevent the caller shell from expanding variables and ensure the child does not echo or trace them.
 - Avoid tools or flags that include secrets in verbose logs, diagnostic dumps, URLs, error reports, or subprocess arguments.
 - Preserve the child process exit status. Do not claim success solely because the credential prompt appeared.
+
+## Documenting the work
+
+When documenting setup or usage afterward, describe credentials as ordinary required environment variables. Use placeholders, for example:
+
+```bash
+export TOKEN=<token>
+command-that-uses-token
+```
+
+Use the actual variable name expected by the program, such as `GITLAB_TOKEN`, instead of always writing `TOKEN`. Never place a real value in the example.
+
+Do not mention `geheim`, its commands, Vaultwarden, credential item names or UUIDs, pinentry, or this device's local credential workflow in normal project documentation. Mention them only when the user explicitly asks to document this local Codex credential setup itself.
 
 ## Approval and failures
 
