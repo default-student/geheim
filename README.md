@@ -12,8 +12,9 @@ geheim run -e GITLAB_TOKEN="GitLab API" -- glab api /projects
 
 Every vault operation begins by locking the dedicated Bitwarden CLI state,
 asks for the master password in `pinentry-gnome3`, unlocks one temporary
-session, performs one operation, and locks again. `geheim run` also displays a
-GUI approval containing the credential names and command before authentication.
+session, performs one operation, and locks again. For `geheim run`, the single
+GUI password prompt also displays the credential names and command; submitting
+the password approves that one execution.
 
 No master password or `BW_SESSION` is persisted. Secret values are not placed
 in argv, files, the caller environment, or wrapper output.
@@ -22,16 +23,27 @@ in argv, files, the caller environment, or wrapper output.
 
 - Configuration: `~/.config/geheim/config.toml`
 - Isolated Bitwarden state: `~/.local/share/geheim/bw-data/`
-- Pinned CLI: `~/.local/lib/geheim/bw-2026.4.2/bw`
+- Pinned CLI: `~/.local/lib/geheim/bw-2026.7.0/bw`
 - Runner: `~/.local/lib/geheim/app/geheim`
 - Command: `~/.local/bin/geheim`
 
-The dedicated Vaultwarden server is fixed to
+The default dedicated Vaultwarden server is
 `https://vaultwarden.example.com/`.
 
+Change the configured server deliberately with:
+
+```bash
+geheim setup --email USER --replace --url https://vaultwarden.example.com/
+```
+
+`--url` requires `--replace`, HTTPS, and port 443. The selected hostname becomes
+the sole network destination allowed to the secret-retrieval component.
+
 The installed CLI is the official x86-64 Linux archive from the Bitwarden
-`cli-v2026.4.2` GitHub release. Its pinned SHA-256 digest is
-`431dbe784cc7de217cb3a826993eac451aa2fbaf336538c0ff6602c1ac884c91`.
+`cli-v2026.7.0` GitHub release. Its pinned SHA-256 digest is
+`7a35145e205952f7434d2370da359543145ae0c45ba1af0fe9bdd99d40a00180`.
+The previous `bw-2026.4.2` installation is retained locally for deliberate
+rollback until the optimized serve lifecycle passes acceptance testing.
 
 ## Credential format
 

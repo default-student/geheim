@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-BW_VERSION=2026.4.2
-BW_SHA256=431dbe784cc7de217cb3a826993eac451aa2fbaf336538c0ff6602c1ac884c91
+BW_VERSION=2026.7.0
+BW_SHA256=7a35145e205952f7434d2370da359543145ae0c45ba1af0fe9bdd99d40a00180
 BW_URL="https://github.com/bitwarden/clients/releases/download/cli-v${BW_VERSION}/bw-linux-${BW_VERSION}.zip"
 PROJECT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 LIB_DIR="${HOME}/.local/lib/geheim"
@@ -24,6 +24,9 @@ chmod 0755 "$INSTALL_DIR/bw"
 install -m 0755 "$PROJECT_DIR/geheim.py" "$PROGRAM_DIR/geheim"
 install -m 0755 "$PROJECT_DIR/network/network_runner.py" "$NETWORK_DIR/network_runner.py"
 install -m 0644 "$PROJECT_DIR/network/hosts" "$NETWORK_DIR/hosts"
+if [ -f "${HOME}/.config/geheim/config.toml" ]; then
+    python3 "$PROJECT_DIR/scripts/migrate_config.py" 2026.4.2 "$BW_VERSION"
+fi
 ln -sfn "$PROGRAM_DIR/geheim" "$BIN_DIR/geheim"
 
 installed_version=$(BITWARDENCLI_APPDATA_DIR="$BW_DATA_DIR" "$INSTALL_DIR/bw" --version)

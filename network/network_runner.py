@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Run pinned bw in a network namespace through one hard-coded Tailscale relay."""
+"""Run pinned bw in a network namespace through one configured Tailscale relay."""
 
 from __future__ import annotations
 
 import os
+import argparse
 from pathlib import Path
 import selectors
 import signal
@@ -14,16 +15,17 @@ import threading
 import urllib.request
 
 
-TARGET_HOST = "vaultwarden.example.com"
 TARGET_PORT = "443"
 TAILSCALE = "/usr/bin/tailscale"
-BW_VERSION = "2026.4.2"
+BW_VERSION = "2026.7.0"
 
 
 class Relay(socketserver.BaseRequestHandler):
+    target_host = ""
+
     def handle(self) -> None:
         upstream = subprocess.Popen(
-            [TAILSCALE, "nc", TARGET_HOST, TARGET_PORT],
+            [TAILSCALE, "nc", self.target_host, TARGET_PORT],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -87,11 +89,11 @@ def start_server() -> tuple[Server, threading.Thread]:
     return server, thread
 
 
-def self_test() -> int:
+def self_test(target_host: str) -> int:
     server, thread = start_server()
     try:
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(f"https://{TARGET_HOST}/", timeout=10) as response:
+        with opener.open(f"https://{target_host}/", timeout=10) as response:
             if response.status != 200:
                 return 1
         try:
@@ -110,11 +112,20 @@ def self_test() -> int:
 
 
 def main() -> int:
-    if len(sys.argv) < 2:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--target-host", required=True)
+    parser.add_argument("--self-test", action="store_true")
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    if not args.target_host or any(character not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-" for character in args.target_host):
         return 2
-    if sys.argv[1:] == ["--self-test"]:
-        return self_test()
-    executable = Path(sys.argv[1]).resolve()
+    Relay.target_host = args.target_host
+    if args.self_test:
+        return self_test(args.target_host)
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command:
+        return 2
+    executable = Path(command[0]).resolve()
     if executable != expected_bw() or not executable.is_file():
         return 2
     server, thread = start_server()
@@ -127,7 +138,7 @@ def main() -> int:
     old_term = signal.signal(signal.SIGTERM, forward)
     old_hup = signal.signal(signal.SIGHUP, forward)
     try:
-        child = subprocess.Popen(sys.argv[1:])
+        child = subprocess.Popen(command)
         return child.wait()
     finally:
         signal.signal(signal.SIGTERM, old_term)

@@ -20,13 +20,13 @@ class StaticSecurityTests(unittest.TestCase):
     def test_version_is_pinned(self):
         source = (ROOT / "geheim.py").read_text()
         installer = (ROOT / "scripts" / "install.sh").read_text()
-        self.assertIn('BW_VERSION = "2026.4.2"', source)
-        self.assertIn("BW_VERSION=2026.4.2", installer)
+        self.assertIn('BW_VERSION = "2026.7.0"', source)
+        self.assertIn("BW_VERSION=2026.7.0", installer)
         self.assertNotIn("/latest/", installer)
 
-    def test_server_is_fixed(self):
+    def test_default_server_is_recorded(self):
         self.assertIn(
-            'SERVER = "https://vaultwarden.example.com/"',
+            'DEFAULT_SERVER = "https://vaultwarden.example.com/"',
             (ROOT / "geheim.py").read_text(),
         )
 

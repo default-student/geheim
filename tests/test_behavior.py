@@ -2,6 +2,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -14,9 +15,10 @@ import geheim
 class FakeVault:
     instances = []
 
-    def __init__(self, config, operation):
+    def __init__(self, config, operation, prompt_details=None):
         self.config = config
         self.operation = operation
+        self.prompt_details = prompt_details
         self.closed = False
         self.__class__.instances.append(self)
 
@@ -43,10 +45,6 @@ class FakeVault:
 class FakePinentry:
     def __init__(self, path):
         pass
-
-    def confirm_run(self, mappings, command):
-        self.mappings = mappings
-        self.command = command
 
 
 class EmptyVault(FakeVault):
@@ -117,6 +115,18 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(stderr.getvalue(), "")
         self.assertNotIn("TEST_SECRET", os.environ)
         self.assertNotIn("disposable-value-not-printed", stdout.getvalue() + stderr.getvalue())
+        prompt = FakeVault.instances[-1].prompt_details
+        self.assertIn("TEST_SECRET <- Disposable Test", prompt)
+        self.assertIn("test -n placeholder", prompt)
+        self.assertNotIn("disposable-value-not-printed", prompt)
+
+    def test_run_rejects_obvious_secret_printing_commands_before_vault(self):
+        for command in (["echo", "$TEST_SECRET"], ["/usr/bin/echo", "$TEST_SECRET"], ["printenv"]):
+            with self.subTest(command=command):
+                FakeVault.instances.clear()
+                with self.assertRaisesRegex(geheim.GeheimError, "Refusing to run"):
+                    geheim.command_run(self.config, [("TEST_SECRET", "Disposable Test")], command, None)
+                self.assertEqual(FakeVault.instances, [])
 
     def test_missing_message_contains_only_safe_suggestions(self):
         message = geheim.missing_message("GitLab API", ["GitLab API Token", "Grafana API"])
@@ -141,6 +151,16 @@ class BehaviorTests(unittest.TestCase):
         with mock.patch.object(geheim, "VaultOperation", EmptyVault), mock.patch("sys.stdout", output):
             self.assertEqual(geheim.command_list(self.config, None), 0)
         self.assertEqual(output.getvalue(), "No accessible credentials are available.\n")
+
+    def test_serve_stress_outputs_counts_not_items(self):
+        output = io.StringIO()
+        with mock.patch.object(geheim, "VaultOperation", EmptyVault), mock.patch("sys.stdout", output):
+            self.assertEqual(geheim.command_serve_stress(self.config, "gitlab", 3), 0)
+        result = output.getvalue()
+        self.assertIn("serve_requests=3", result)
+        self.assertIn("serve_failures=0", result)
+        self.assertIn("locked_after_test=yes", result)
+        self.assertNotIn("Disposable Test", result)
 
     def test_config_is_private_and_atomic(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -168,6 +188,23 @@ class BehaviorTests(unittest.TestCase):
         bw.status.return_value = "unlocked"
         with self.assertRaises(geheim.GeheimError):
             bw.lock(allow_unauthenticated=True)
+
+    def test_existing_setup_reports_remote_server(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            config_path.touch()
+            with self.assertRaisesRegex(geheim.GeheimError, re.escape(geheim.SERVER)):
+                geheim.command_setup("codex@example.invalid", False, None, config_path)
+
+    def test_url_change_requires_replace_and_https(self):
+        with self.assertRaisesRegex(geheim.GeheimError, "--replace"):
+            geheim.command_setup("codex@example.invalid", False, "https://vault.example/", Path("unused"))
+        with self.assertRaises(geheim.GeheimError):
+            geheim.normalize_server_url("http://vault.example/")
+        self.assertEqual(
+            geheim.normalize_server_url("https://VAULT.example/base"),
+            "https://vault.example/base/",
+        )
 
 
 if __name__ == "__main__":

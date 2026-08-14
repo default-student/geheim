@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import difflib
 import fcntl
+import http.client
 import json
 import os
 from pathlib import Path
@@ -15,18 +16,32 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
+import urllib.parse
 from dataclasses import dataclass
 from typing import NoReturn, Sequence
 
 
-SERVER = "https://vaultwarden.example.com/"
-BW_VERSION = "2026.4.2"
+DEFAULT_SERVER = "https://vaultwarden.example.com/"
+SERVER = DEFAULT_SERVER
+BW_VERSION = "2026.7.0"
 DEFAULT_CONFIG = Path.home() / ".config" / "geheim" / "config.toml"
 DEFAULT_BW_DATA = Path.home() / ".local" / "share" / "geheim" / "bw-data"
 DEFAULT_BW = Path.home() / ".local" / "lib" / "geheim" / f"bw-{BW_VERSION}" / "bw"
 DEFAULT_PINENTRY = Path("/usr/bin/pinentry-gnome3")
 ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DENIED_RUN_COMMANDS = {
+    "declare",
+    "echo",
+    "env",
+    "export",
+    "printenv",
+    "printf",
+    "set",
+    "typeset",
+}
+HOST_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$")
 
 
 class GeheimError(Exception):
@@ -35,6 +50,33 @@ class GeheimError(Exception):
 
 class AuthenticationCancelled(GeheimError):
     pass
+
+
+def normalize_server_url(value: str) -> str:
+    parsed = urllib.parse.urlsplit(value.strip())
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.port not in (None, 443)
+        or not HOST_NAME.fullmatch(parsed.hostname)
+    ):
+        raise GeheimError("Vaultwarden URL must be an HTTPS hostname on port 443 without credentials, query, or fragment.")
+    path = parsed.path.rstrip("/")
+    return urllib.parse.urlunsplit(("https", parsed.hostname.lower(), path + "/", "", ""))
+
+
+def write_network_hosts(config: "Config") -> Path:
+    hostname = urllib.parse.urlsplit(config.server).hostname
+    if hostname is None:
+        raise GeheimError("Configured Vaultwarden URL has no hostname")
+    path = config.bw_data_dir / "network-hosts"
+    path.write_text(f"127.0.0.1 localhost {hostname}\n::1 localhost ip6-localhost ip6-loopback\n")
+    os.chmod(path, 0o600)
+    return path
 
 
 @dataclass(frozen=True)
@@ -69,8 +111,8 @@ class Config:
             network_enforcement=str(raw.get("network_enforcement", "none")),
             network_allow=tuple(str(item) for item in raw.get("network_allow", [])),
         )
-        if cfg.server.rstrip("/") != SERVER.rstrip("/"):
-            raise GeheimError(f"Refusing unexpected server in configuration: {cfg.server}")
+        if normalize_server_url(cfg.server) != cfg.server:
+            raise GeheimError(f"Invalid server in configuration: {cfg.server}")
         if cfg.bw_version != BW_VERSION:
             raise GeheimError(
                 f"Configured bw version is {cfg.bw_version}, but this geheim release requires {BW_VERSION}."
@@ -167,23 +209,10 @@ class Pinentry:
                 proc.kill()
                 proc.wait()
 
-    def confirm_run(self, mappings: Sequence[tuple[str, str]], command: Sequence[str]) -> None:
-        safe_mappings = "\n".join(f"{name} <- {item}" for name, item in mappings)
-        rendered = shlex.join(command)
-        description = f"Allow geheim run?\n\nCredentials:\n{safe_mappings}\n\nCommand:\n{rendered}"
-        self._exchange(
-            [
-                b"SETTITLE geheim approval",
-                b"SETDESC " + _pinentry_escape(description),
-                b"SETOK Run once",
-                b"SETCANCEL Cancel",
-                b"CONFIRM",
-            ],
-            expect_data=False,
-        )
-
-    def password(self, operation: str, email: str) -> bytearray:
+    def password(self, operation: str, email: str, details: str | None = None) -> bytearray:
         description = f"Unlock the Codex Vaultwarden account for one {operation} operation.\nAccount: {email}"
+        if details:
+            description += f"\n\n{details}"
         result = self._exchange(
             [
                 b"SETTITLE geheim Vaultwarden authentication",
@@ -221,17 +250,24 @@ class Bw:
             raise GeheimError(f"Unknown network enforcement mode: {self.config.network_enforcement}")
         geheim_root = self.config.bw_path.parent.parent
         runner = geheim_root / "network" / "network_runner.py"
-        hosts = geheim_root / "network" / "hosts"
-        if not runner.is_file() or not hosts.is_file():
+        hosts = self.config.bw_data_dir / "network-hosts"
+        if not runner.is_file():
             raise GeheimError("geheim network-isolation support files are missing")
+        write_network_hosts(self.config)
+        target_host = urllib.parse.urlsplit(self.config.server).hostname
+        assert target_host is not None
+        runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/geheim-{os.getuid()}")) / "geheim"
+        runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(runtime, 0o700)
         return [
             "/usr/bin/bwrap",
             "--unshare-user", "--uid", "0", "--gid", "0", "--cap-add", "CAP_NET_BIND_SERVICE",
             "--unshare-net", "--die-with-parent", "--new-session",
             "--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
             "--bind", str(self.config.bw_data_dir), str(self.config.bw_data_dir),
+            "--bind", str(runtime), str(runtime),
             "--ro-bind", str(hosts), "/etc/hosts",
-            "/usr/bin/python3", str(runner), *command,
+            "/usr/bin/python3", str(runner), "--target-host", target_host, "--", *command,
         ]
 
     def run(
@@ -331,6 +367,153 @@ class Bw:
         return items
 
 
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: Path, timeout: float = 20):
+        super().__init__("localhost", timeout=timeout)
+        self.socket_path = socket_path
+
+    def connect(self) -> None:
+        import socket
+
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(self.socket_path))
+
+
+class BwServeSession:
+    def __init__(self, config: Config):
+        self.config = config
+        self.bw = Bw(config)
+        self.runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/tmp/geheim-{os.getuid()}")) / "geheim"
+        self.socket_path = self.runtime / f"bw-serve-{os.getpid()}.sock"
+        self.process: subprocess.Popen | None = None
+
+    def start(self) -> None:
+        self.runtime.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.runtime, 0o700)
+        try:
+            self.socket_path.unlink()
+        except FileNotFoundError:
+            pass
+        hostname = f"unix://{self.socket_path}"
+        self.process = subprocess.Popen(
+            self.bw._command(["serve", "--hostname", hostname, "--port", "8087"]),
+            env=self.bw._base_env(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            if self.socket_path.exists():
+                os.chmod(self.socket_path, 0o600)
+                return
+            if self.process.poll() is not None:
+                break
+            time.sleep(0.02)
+        self.stop()
+        raise GeheimError("The short-lived Vaultwarden service did not start")
+
+    def stop(self) -> None:
+        if self.process is not None and self.process.poll() is None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                self.process.kill()
+                self.process.wait()
+        self.process = None
+        try:
+            self.socket_path.unlink()
+        except FileNotFoundError:
+            pass
+
+    def request(self, method: str, path: str, body: dict | None = None) -> object:
+        connection = UnixHTTPConnection(self.socket_path)
+        encoded: bytes | None = None
+        headers = {"Host": f"unix://{self.socket_path}:8087"}
+        if body is not None:
+            encoded = json.dumps(body, separators=(",", ":")).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        try:
+            connection.request(method, path, body=encoded, headers=headers)
+            response = connection.getresponse()
+            payload = response.read()
+        except (OSError, http.client.HTTPException) as exc:
+            raise GeheimError("The short-lived Vaultwarden service request failed") from exc
+        finally:
+            connection.close()
+            encoded = None
+        try:
+            decoded = json.loads(payload)
+        except json.JSONDecodeError as exc:
+            raise GeheimError("The short-lived Vaultwarden service returned invalid data") from exc
+        if response.status != 200 or not isinstance(decoded, dict) or not decoded.get("success"):
+            message = ""
+            if isinstance(decoded, dict):
+                message = str(decoded.get("message", ""))
+            raise GeheimError(_safe_bw_error(message) or "Vaultwarden operation failed.")
+        return decoded.get("data")
+
+    def status(self) -> str:
+        data = self.request("GET", "/status")
+        template = data.get("template") if isinstance(data, dict) else None
+        if not isinstance(template, dict) or template.get("status") not in ("locked", "unlocked", "unauthenticated"):
+            raise GeheimError("The short-lived Vaultwarden service returned an invalid status")
+        return str(template["status"])
+
+    def lock(self) -> None:
+        self.request("POST", "/lock")
+
+    def unlock(self, password: bytearray) -> None:
+        password_text = password.decode("utf-8")
+        try:
+            self.request("POST", "/unlock", {"password": password_text})
+        finally:
+            password_text = ""
+        if self.status() != "unlocked":
+            raise GeheimError("Vaultwarden did not enter the temporary unlocked state")
+
+    def sync(self) -> None:
+        self.request("POST", "/sync")
+
+    def safe_items(self, query: str | None = None) -> list[dict[str, str]]:
+        path = "/list/object/items"
+        if query:
+            path += "?" + urllib.parse.urlencode({"search": query})
+        wrapped = self.request("GET", path)
+        raw_items = wrapped.get("data") if isinstance(wrapped, dict) else None
+        if not isinstance(raw_items, list):
+            raise GeheimError("The short-lived Vaultwarden service returned an invalid item list")
+        safe: list[dict[str, str]] = []
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
+            item_id = item.get("id")
+            name = item.get("name")
+            if isinstance(item_id, str) and isinstance(name, str) and item_id and name.strip():
+                safe.append({"id": item_id, "name": name.strip()})
+            item.clear()
+        raw_items.clear()
+        return safe
+
+    def password_for(self, item_id: str) -> str:
+        path = "/object/password/" + urllib.parse.quote(item_id, safe="")
+        wrapped = self.request("GET", path)
+        value = wrapped.get("data") if isinstance(wrapped, dict) else None
+        if not isinstance(value, str) or not value:
+            raise GeheimError("The selected credential has no login password value.")
+        return value
+
+    def __enter__(self) -> "BwServeSession":
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.stop()
+        return False
+
+
 def _safe_bw_error(stderr: str) -> str:
     lower = stderr.lower()
     if "invalid master password" in lower or "incorrect" in lower:
@@ -353,12 +536,12 @@ def _safe_bw_error(stderr: str) -> str:
 
 
 class VaultOperation:
-    def __init__(self, config: Config, operation: str):
+    def __init__(self, config: Config, operation: str, prompt_details: str | None = None):
         self.config = config
         self.operation = operation
-        self.bw = Bw(config)
+        self.serve = BwServeSession(config)
         self.pinentry = Pinentry(config.pinentry_path)
-        self.session: str | None = None
+        self.prompt_details = prompt_details
         self.vault_closed = False
         self._lock_handle = None
 
@@ -369,23 +552,23 @@ class VaultOperation:
         self._lock_handle = (runtime / "operation.lock").open("a+")
         fcntl.flock(self._lock_handle, fcntl.LOCK_EX)
         try:
-            self.bw.lock()
-            password = self.pinentry.password(self.operation, self.config.email)
+            self.serve.start()
+            self.serve.lock()
+            if self.serve.status() != "locked":
+                raise GeheimError("Vaultwarden did not enter the required locked state")
+            password = self.pinentry.password(self.operation, self.config.email, self.prompt_details)
             try:
-                result = self.bw.run(
-                    ["unlock", "--passwordenv", "GEHEIM_MASTER_PASSWORD", "--raw"], password=password
-                )
+                self.serve.unlock(password)
             finally:
                 for index in range(len(password)):
                     password[index] = 0
-            session = result.stdout.strip()
-            if not session or "\n" in session:
-                raise GeheimError("bw did not return a valid temporary session")
-            self.session = session
             return self
         except BaseException:
             try:
-                self.bw.lock()
+                try:
+                    self.serve.lock()
+                finally:
+                    self.serve.stop()
             finally:
                 fcntl.flock(self._lock_handle, fcntl.LOCK_UN)
                 self._lock_handle.close()
@@ -395,9 +578,12 @@ class VaultOperation:
     def close_vault(self) -> None:
         if self.vault_closed:
             return
-        if self.session is not None:
-            self.session = None
-        self.bw.lock()
+        try:
+            self.serve.lock()
+            if self.serve.status() != "locked":
+                raise GeheimError("Vaultwarden did not return to locked state")
+        finally:
+            self.serve.stop()
         self.vault_closed = True
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
@@ -415,20 +601,13 @@ class VaultOperation:
         return False
 
     def sync(self) -> None:
-        assert self.session is not None
-        self.bw.run(["sync"], session=self.session)
+        self.serve.sync()
 
     def items(self, query: str | None = None) -> list[dict]:
-        assert self.session is not None
-        return self.bw.safe_items(self.session, query)
+        return self.serve.safe_items(query)
 
     def password_for(self, item_id: str) -> str:
-        assert self.session is not None
-        result = self.bw.run(["get", "password", item_id], session=self.session)
-        value = result.stdout.rstrip("\n")
-        if not value:
-            raise GeheimError("The selected credential has no login password value.")
-        return value
+        return self.serve.password_for(item_id)
 
 
 def safe_names(items: Sequence[dict]) -> list[str]:
@@ -470,6 +649,12 @@ def parse_mapping(value: str) -> tuple[str, str]:
     return name, item
 
 
+def validate_child_command(command: Sequence[str]) -> None:
+    executable = Path(command[0]).name
+    if executable in DENIED_RUN_COMMANDS:
+        raise GeheimError(f"Refusing to run {executable!r} with injected credentials")
+
+
 def command_list(config: Config, query: str | None) -> int:
     operation = "search" if query is not None else "list"
     with VaultOperation(config, operation) as vault:
@@ -498,10 +683,11 @@ def command_run(config: Config, mappings: Sequence[tuple[str, str]], command: Se
         raise GeheimError("geheim run requires a command after --")
     if len({name for name, _ in mappings}) != len(mappings):
         raise GeheimError("Each environment variable may be mapped only once")
-    pinentry = Pinentry(config.pinentry_path)
-    pinentry.confirm_run(mappings, command)
+    validate_child_command(command)
+    safe_mappings = "\n".join(f"{name} <- {item}" for name, item in mappings)
+    prompt_details = f"Credentials:\n{safe_mappings}\n\nCommand:\n{shlex.join(command)}"
     secrets: dict[str, str] = {}
-    with VaultOperation(config, "geheim run") as vault:
+    with VaultOperation(config, "geheim run", prompt_details) as vault:
         vault.sync()
         all_items = vault.items()
         names = safe_names(all_items)
@@ -554,56 +740,62 @@ def command_run(config: Config, mappings: Sequence[tuple[str, str]], command: Se
                 child_env.pop(key, None)
 
 
-def command_setup(email: str, replace: bool, config_path: Path) -> int:
+def command_setup(email: str, replace: bool, url: str | None, config_path: Path) -> int:
+    if url is not None and not replace:
+        raise GeheimError("--url may only be used together with --replace")
     if config_path.exists() and not replace:
         raise GeheimError(
-            f"geheim is already configured at {config_path}. Use --replace to change the dedicated account."
+            f"geheim is already configured for remote Vaultwarden {SERVER} at {config_path}. "
+            "Use --replace to change the dedicated account."
         )
     previous: Config | None = None
     if config_path.exists():
         previous = Config.load(config_path)
+    server = normalize_server_url(url) if url is not None else (previous.server if previous else DEFAULT_SERVER)
     config = Config(
         email=email,
-        server=SERVER,
+        server=server,
         bw_path=DEFAULT_BW,
         bw_data_dir=DEFAULT_BW_DATA,
         pinentry_path=DEFAULT_PINENTRY,
         bw_version=BW_VERSION,
         network_enforcement="bubblewrap-tailscale",
     )
+    setup_details = f"Remote Vaultwarden:\n{server}"
     config.bw_data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(config.bw_data_dir, 0o700)
+    same_account_reset = (
+        replace
+        and previous is not None
+        and previous.email == email
+        and previous.server == server
+    )
+    if same_account_reset:
+        with VaultOperation(config, "setup verification", setup_details):
+            pass
+        write_config(config, config_path)
+        print(
+            f"Configured dedicated Vaultwarden account {email} for {server}; "
+            "vault status is locked."
+        )
+        return 0
     bw = Bw(config)
     pinentry = Pinentry(config.pinentry_path)
     status = bw.lock(allow_unauthenticated=True)
     try:
-        same_account_reset = (
-            replace
-            and previous is not None
-            and previous.email == email
-            and previous.server.rstrip("/") == SERVER.rstrip("/")
-            and status == "locked"
-        )
-        if status != "unauthenticated" and not same_account_reset:
+        if status != "unauthenticated":
             if not replace:
                 raise GeheimError("The isolated bw state already contains a logged-in account.")
             result = bw.run(["logout"], check=False)
             if result.returncode != 0:
                 raise GeheimError("Could not log out the previously configured Vaultwarden account.")
-        if not same_account_reset:
-            bw.run(["config", "server", SERVER])
-        password = pinentry.password("setup verification" if same_account_reset else "initial login", email)
+        bw.run(["config", "server", server])
+        password = pinentry.password("initial login", email, setup_details)
         try:
-            if same_account_reset:
-                result = bw.run(
-                    ["unlock", "--passwordenv", "GEHEIM_MASTER_PASSWORD", "--raw"],
-                    password=password,
-                )
-            else:
-                result = bw.run(
-                    ["login", email, "--passwordenv", "GEHEIM_MASTER_PASSWORD", "--raw"],
-                    password=password,
-                )
+            result = bw.run(
+                ["login", email, "--passwordenv", "GEHEIM_MASTER_PASSWORD", "--raw"],
+                password=password,
+            )
         finally:
             for index in range(len(password)):
                 password[index] = 0
@@ -612,8 +804,35 @@ def command_setup(email: str, replace: bool, config_path: Path) -> int:
     finally:
         bw.lock(allow_unauthenticated=True)
     write_config(config, config_path)
-    print(f"Configured dedicated Vaultwarden account {email}; vault status is locked.")
+    print(
+        f"Configured dedicated Vaultwarden account {email} for {server}; "
+        "vault status is locked."
+    )
     return 0
+
+
+def command_serve_stress(config: Config, query: str, iterations: int) -> int:
+    if iterations < 1 or iterations > 1000:
+        raise GeheimError("Serve stress iterations must be between 1 and 1000")
+    failures = 0
+    started = time.monotonic()
+    with VaultOperation(config, "serve stress test") as vault:
+        for index in range(iterations):
+            try:
+                if index % 25 == 0:
+                    vault.sync()
+                items = vault.items(query)
+                for item in items:
+                    item.clear()
+                items.clear()
+            except GeheimError:
+                failures += 1
+    elapsed = time.monotonic() - started
+    print(f"serve_requests={iterations}")
+    print(f"serve_failures={failures}")
+    print(f"elapsed_seconds={elapsed:.3f}")
+    print("locked_after_test=yes")
+    return 0 if failures == 0 else 1
 
 
 def build_parser(prog: str) -> argparse.ArgumentParser:
@@ -622,6 +841,7 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     setup = sub.add_parser("setup")
     setup.add_argument("--email", required=True)
     setup.add_argument("--replace", action="store_true")
+    setup.add_argument("--url")
     sub.add_parser("list")
     search = sub.add_parser("search")
     search.add_argument("query")
@@ -631,6 +851,12 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     run.add_argument("command", nargs=argparse.REMAINDER)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
+    status.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
+    self_test = sub.add_parser("self-test")
+    self_test_sub = self_test.add_subparsers(dest="test_action", required=True)
+    serve_test = self_test_sub.add_parser("serve")
+    serve_test.add_argument("--query", default="")
+    serve_test.add_argument("--iterations", type=int, default=250)
     return parser
 
 
@@ -663,16 +889,22 @@ def main(argv: Sequence[str] | None = None, *, config_path: Path = DEFAULT_CONFI
     args = build_parser(prog).parse_args(argv)
     try:
         if prog == "geheim" and args.action == "setup":
-            return command_setup(args.email, args.replace, config_path)
+            return command_setup(args.email, args.replace, args.url, config_path)
         config = Config.load(config_path)
         if args.action in ("list", "search"):
             return command_list(config, args.query if args.action == "search" else None)
         if args.action == "run":
             command = args.command[1:] if args.command[:1] == ["--"] else args.command
             return command_run(config, args.mappings, command, args.timeout)
+        if args.action == "self-test" and args.test_action == "serve":
+            return command_serve_stress(config, args.query, args.iterations)
         if args.action == "status":
-            bw = Bw(config)
-            status = bw.status()
+            if args.serve:
+                with BwServeSession(config) as serve:
+                    status = serve.status()
+            else:
+                bw = Bw(config)
+                status = bw.status()
             if args.json:
                 print(json.dumps({"status": status, "server": config.server, "bw_version": config.bw_version}))
             else:
