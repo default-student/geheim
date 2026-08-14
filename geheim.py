@@ -337,6 +337,16 @@ def _safe_bw_error(stderr: str) -> str:
         return "Vaultwarden authentication was rejected."
     if "not logged in" in lower or "unauthenticated" in lower:
         return 'The Codex Vaultwarden account is not logged in. Run "geheim setup".'
+    if any(marker in lower for marker in ("fetch failed", "network request failed", "econnrefused", "enotfound")):
+        return "The Vaultwarden network request failed."
+    if "certificate" in lower or "tls" in lower:
+        return "Vaultwarden TLS verification failed."
+    if "session key" in lower and ("invalid" in lower or "missing" in lower):
+        return "The temporary Vaultwarden session was rejected."
+    if "vault is locked" in lower:
+        return "Vaultwarden reported that the vault is locked."
+    if "failed to decrypt" in lower or "cannot decrypt" in lower:
+        return "Vaultwarden item decryption failed."
     if "timeout" in lower or "timed out" in lower:
         return "Vaultwarden operation timed out."
     return "Vaultwarden operation failed."
@@ -349,6 +359,7 @@ class VaultOperation:
         self.bw = Bw(config)
         self.pinentry = Pinentry(config.pinentry_path)
         self.session: str | None = None
+        self.vault_closed = False
         self._lock_handle = None
 
     def __enter__(self) -> "VaultOperation":
@@ -359,11 +370,6 @@ class VaultOperation:
         fcntl.flock(self._lock_handle, fcntl.LOCK_EX)
         try:
             self.bw.lock()
-            status = self.bw.status()
-            if status == "unauthenticated":
-                raise GeheimError('The Codex Vaultwarden account is not logged in. Run "geheim setup".')
-            if status != "locked":
-                raise GeheimError(f"Unexpected vault status after locking: {status}")
             password = self.pinentry.password(self.operation, self.config.email)
             try:
                 result = self.bw.run(
@@ -387,9 +393,12 @@ class VaultOperation:
             raise
 
     def close_vault(self) -> None:
+        if self.vault_closed:
+            return
         if self.session is not None:
             self.session = None
         self.bw.lock()
+        self.vault_closed = True
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
         lock_error: GeheimError | None = None
@@ -464,10 +473,21 @@ def parse_mapping(value: str) -> tuple[str, str]:
 def command_list(config: Config, query: str | None) -> int:
     operation = "search" if query is not None else "list"
     with VaultOperation(config, operation) as vault:
-        vault.sync()
-        names = safe_names(vault.items(query))
+        try:
+            vault.sync()
+        except GeheimError as exc:
+            raise GeheimError(f"Credential synchronization failed: {exc}") from exc
+        try:
+            names = safe_names(vault.items(query))
+        except GeheimError as exc:
+            raise GeheimError(f"Credential discovery failed: {exc}") from exc
     for name in names:
         print(name)
+    if not names:
+        if query is None:
+            print("No accessible credentials are available.")
+        else:
+            print(f'No accessible credentials matched "{query}".')
     return 0
 
 
@@ -539,6 +559,9 @@ def command_setup(email: str, replace: bool, config_path: Path) -> int:
         raise GeheimError(
             f"geheim is already configured at {config_path}. Use --replace to change the dedicated account."
         )
+    previous: Config | None = None
+    if config_path.exists():
+        previous = Config.load(config_path)
     config = Config(
         email=email,
         server=SERVER,
@@ -554,19 +577,33 @@ def command_setup(email: str, replace: bool, config_path: Path) -> int:
     pinentry = Pinentry(config.pinentry_path)
     status = bw.lock(allow_unauthenticated=True)
     try:
-        if status != "unauthenticated":
+        same_account_reset = (
+            replace
+            and previous is not None
+            and previous.email == email
+            and previous.server.rstrip("/") == SERVER.rstrip("/")
+            and status == "locked"
+        )
+        if status != "unauthenticated" and not same_account_reset:
             if not replace:
                 raise GeheimError("The isolated bw state already contains a logged-in account.")
             result = bw.run(["logout"], check=False)
             if result.returncode != 0:
                 raise GeheimError("Could not log out the previously configured Vaultwarden account.")
-        bw.run(["config", "server", SERVER])
-        password = pinentry.password("initial login", email)
+        if not same_account_reset:
+            bw.run(["config", "server", SERVER])
+        password = pinentry.password("setup verification" if same_account_reset else "initial login", email)
         try:
-            result = bw.run(
-                ["login", email, "--passwordenv", "GEHEIM_MASTER_PASSWORD", "--raw"],
-                password=password,
-            )
+            if same_account_reset:
+                result = bw.run(
+                    ["unlock", "--passwordenv", "GEHEIM_MASTER_PASSWORD", "--raw"],
+                    password=password,
+                )
+            else:
+                result = bw.run(
+                    ["login", email, "--passwordenv", "GEHEIM_MASTER_PASSWORD", "--raw"],
+                    password=password,
+                )
         finally:
             for index in range(len(password)):
                 password[index] = 0
@@ -574,8 +611,6 @@ def command_setup(email: str, replace: bool, config_path: Path) -> int:
             raise GeheimError("bw login did not return a temporary session")
     finally:
         bw.lock(allow_unauthenticated=True)
-    if bw.status() != "locked":
-        raise GeheimError("Vaultwarden login succeeded, but the CLI did not return to locked state")
     write_config(config, config_path)
     print(f"Configured dedicated Vaultwarden account {email}; vault status is locked.")
     return 0

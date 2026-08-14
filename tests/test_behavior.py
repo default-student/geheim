@@ -49,6 +49,11 @@ class FakePinentry:
         self.command = command
 
 
+class EmptyVault(FakeVault):
+    def items(self, query=None):
+        return []
+
+
 class FakeChild:
     def __init__(self, command, env):
         assert command == ["test", "-n", "placeholder"]
@@ -124,6 +129,18 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["search", "git"]).query, "git")
         parsed = parser.parse_args(["run", "-e", "TOKEN=GitLab API", "--", "true"])
         self.assertEqual(parsed.mappings, [("TOKEN", "GitLab API")])
+
+    def test_empty_search_is_explicit(self):
+        output = io.StringIO()
+        with mock.patch.object(geheim, "VaultOperation", EmptyVault), mock.patch("sys.stdout", output):
+            self.assertEqual(geheim.command_list(self.config, "gitlab"), 0)
+        self.assertEqual(output.getvalue(), 'No accessible credentials matched "gitlab".\n')
+
+    def test_empty_list_is_explicit(self):
+        output = io.StringIO()
+        with mock.patch.object(geheim, "VaultOperation", EmptyVault), mock.patch("sys.stdout", output):
+            self.assertEqual(geheim.command_list(self.config, None), 0)
+        self.assertEqual(output.getvalue(), "No accessible credentials are available.\n")
 
     def test_config_is_private_and_atomic(self):
         with tempfile.TemporaryDirectory() as directory:
