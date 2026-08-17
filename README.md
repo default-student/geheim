@@ -5,6 +5,19 @@ It lets an agent discover safe item names and inject selected login passwords
 into a child process environment without printing, storing, or exposing the
 secret value through the wrapper.
 
+**Example**
+```bash
+# find secret in vault
+geheim search gitlab
+  gitlab readonly token
+  gitlab token codex
+  <secret name2 in vault>
+# use secret for execution
+geheim run -e SECRET_ENV_VAR="<secret name>" -- <cli command that needs secret in envvar>
+  # secret authed execution of command with env var
+```
+
+
 ```bash
 geheim list
 geheim search gitlab
