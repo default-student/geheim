@@ -1,0 +1,29 @@
+{
+  "name": "geheim-credentials",
+  "version": "0.1.0",
+  "description": "Safely run local commands with credentials injected by geheim without exposing secret values.",
+  "author": {
+    "name": "geheim"
+  },
+  "keywords": [
+    "credentials",
+    "vaultwarden",
+    "codex",
+    "secrets"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Geheim Credentials",
+    "shortDescription": "Run commands with credentials without disclosure",
+    "longDescription": "Provides Codex guidance for discovering safe credential names and running commands through geheim without printing, storing, or exposing secret values.",
+    "developerName": "geheim",
+    "category": "Productivity",
+    "capabilities": [
+      "Credentials",
+      "Local commands"
+    ],
+    "defaultPrompt": [
+      "Use Geheim Credentials to run this command safely."
+    ]
+  }
+}

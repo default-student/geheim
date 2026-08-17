@@ -154,6 +154,16 @@ in `scripts/install.sh` and `geheim.py`. To update:
 
 The runner never updates `bw` automatically.
 
+## Codex Plugin
+
+This repository also contains a Codex plugin package. The plugin manifest is at
+`.codex-plugin/plugin.json` and bundles the `geheim-credentials` skill from
+`skills/geheim-credentials/`.
+
+Use the plugin when you want Codex to follow the safe local credential workflow
+while running commands. The skill is guidance-only; the actual command-line
+tool remains `geheim`.
+
 ## Security Boundary
 
 The wrapper prevents accidental disclosure through its own interface, but it
