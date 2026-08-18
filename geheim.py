@@ -56,6 +56,10 @@ class AuthenticationCancelled(GeheimError):
     pass
 
 
+class PinentryRetryableError(GeheimError):
+    pass
+
+
 def normalize_server_url(value: str) -> str:
     parsed = urllib.parse.urlsplit(value.strip())
     if (
@@ -174,21 +178,30 @@ class Pinentry:
         if not self.executable.is_file():
             raise GeheimError(f"pinentry executable not found: {self.executable}")
         proc = subprocess.Popen(
-            [str(self.executable)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL
+            [str(self.executable)],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            bufsize=0,
         )
         assert proc.stdin is not None and proc.stdout is not None
+        pinentry_stdin = proc.stdin
+        pinentry_stdout = proc.stdout
         data: bytearray | None = None
         try:
-            greeting = proc.stdout.readline()
+            greeting = pinentry_stdout.readline()
             if not greeting.startswith(b"OK"):
                 raise GeheimError("pinentry did not start correctly")
             for command in commands:
-                proc.stdin.write(command + b"\n")
-                proc.stdin.flush()
+                try:
+                    pinentry_stdin.write(command + b"\n")
+                    pinentry_stdin.flush()
+                except (BrokenPipeError, OSError) as exc:
+                    raise PinentryRetryableError("pinentry closed unexpectedly") from exc
                 while True:
-                    line = proc.stdout.readline()
+                    line = pinentry_stdout.readline()
                     if not line:
-                        raise GeheimError("pinentry closed unexpectedly")
+                        raise PinentryRetryableError("pinentry closed unexpectedly")
                     line = line.rstrip(b"\r\n")
                     if line.startswith(b"D "):
                         data = bytearray(_pinentry_unescape(line[2:]))
@@ -198,14 +211,22 @@ class Pinentry:
                         if b"cancel" in line.lower():
                             raise AuthenticationCancelled("Authentication was cancelled.")
                         raise GeheimError("pinentry rejected the request")
-            if expect_data and data is None:
-                raise GeheimError("pinentry returned no password")
+            if expect_data and not data:
+                raise PinentryRetryableError("pinentry returned no password")
             return data
         finally:
             try:
-                proc.stdin.write(b"BYE\n")
-                proc.stdin.flush()
+                pinentry_stdin.write(b"BYE\n")
+                pinentry_stdin.flush()
             except (BrokenPipeError, OSError):
+                pass
+            try:
+                pinentry_stdin.close()
+            except (BrokenPipeError, OSError):
+                pass
+            try:
+                pinentry_stdout.close()
+            except OSError:
                 pass
             try:
                 proc.wait(timeout=2)
@@ -217,17 +238,26 @@ class Pinentry:
         description = f"Unlock the Codex Vaultwarden account for one {operation} operation.\nAccount: {email}"
         if details:
             description += f"\n\n{details}"
-        result = self._exchange(
-            [
-                b"SETTITLE geheim Vaultwarden authentication",
-                b"SETDESC " + _pinentry_escape(description),
-                b"SETPROMPT Master password:",
-                b"SETOK Unlock once",
-                b"SETCANCEL Cancel",
-                b"GETPIN",
-            ],
-            expect_data=True,
-        )
+        base_commands = [
+            b"SETTITLE geheim Vaultwarden authentication",
+            b"SETDESC " + _pinentry_escape(description),
+            b"SETPROMPT Master password:",
+            b"SETOK Unlock once",
+            b"SETCANCEL Cancel",
+        ]
+        max_attempts = 2
+        for attempt in range(1, max_attempts + 1):
+            commands = [*base_commands]
+            if attempt > 1:
+                commands.append(b"SETERROR " + _pinentry_escape("Password cannot be empty. Please try again."))
+            commands.append(b"GETPIN")
+            try:
+                result = self._exchange(commands, expect_data=True)
+                break
+            except PinentryRetryableError as exc:
+                if attempt == max_attempts:
+                    raise
+                print(f"geheim: {exc}; password cannot be empty, try again.", file=sys.stderr)
         assert result is not None
         return result
 
@@ -661,6 +691,23 @@ def validate_child_command(command: Sequence[str]) -> None:
         raise GeheimError(f"Refusing to run {executable!r} with injected credentials")
 
 
+def command_preview(command: Sequence[str], limit: int = 480) -> str:
+    rendered = shlex.join(command)
+    if len(rendered) <= limit:
+        return rendered
+    preview: list[str] = []
+    used = 0
+    for index, argument in enumerate(command):
+        quoted = shlex.quote(argument)
+        separator = 1 if preview else 0
+        if used + separator + len(quoted) > limit:
+            preview.append(f"<argument {index + 1} omitted: {len(argument)} characters>")
+            break
+        preview.append(quoted)
+        used += separator + len(quoted)
+    return " ".join(preview) + f" <command preview shortened: {len(rendered)} characters total>"
+
+
 def command_list(config: Config, query: str | None) -> int:
     operation = "search" if query is not None else "list"
     with VaultOperation(config, operation) as vault:
@@ -691,7 +738,7 @@ def command_run(config: Config, mappings: Sequence[tuple[str, str]], command: Se
         raise GeheimError("Each environment variable may be mapped only once")
     validate_child_command(command)
     safe_mappings = "\n".join(f"{name} <- {item}" for name, item in mappings)
-    prompt_details = f"Credentials:\n{safe_mappings}\n\nCommand:\n{shlex.join(command)}"
+    prompt_details = f"Credentials:\n{safe_mappings}\n\nCommand:\n{command_preview(command)}"
     secrets: dict[str, str] = {}
     with VaultOperation(config, "geheim run", prompt_details) as vault:
         vault.sync()

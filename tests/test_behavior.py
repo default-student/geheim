@@ -66,6 +66,50 @@ class FakeChild:
         return 0
 
 
+class ClosingPipe:
+    def __init__(self):
+        self.closed = False
+
+    def write(self, data):
+        raise BrokenPipeError()
+
+    def flush(self):
+        raise BrokenPipeError()
+
+    def close(self):
+        self.closed = True
+
+
+class EarlyCloseStdout:
+    def __init__(self):
+        self.closed = False
+        self.calls = 0
+
+    def readline(self):
+        self.calls += 1
+        if self.calls == 1:
+            return b"OK ready\n"
+        return b""
+
+    def close(self):
+        self.closed = True
+
+
+class EarlyClosePinentryProcess:
+    instances = []
+
+    def __init__(self, command, stdin, stdout, stderr, bufsize=None):
+        self.command = command
+        self.stdin = ClosingPipe()
+        self.stdout = EarlyCloseStdout()
+        self.bufsize = bufsize
+        self.returncode = 1
+        self.__class__.instances.append(self)
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+
 class BehaviorTests(unittest.TestCase):
     def setUp(self):
         FakeVault.instances.clear()
@@ -128,6 +172,52 @@ class BehaviorTests(unittest.TestCase):
                     geheim.command_run(self.config, [("TEST_SECRET", "Disposable Test")], command, None)
                 self.assertEqual(FakeVault.instances, [])
 
+    def test_pinentry_early_close_is_cleaned_up(self):
+        EarlyClosePinentryProcess.instances.clear()
+        pinentry = geheim.Pinentry(Path("/tmp/pinentry"))
+        with (
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(geheim.subprocess, "Popen", EarlyClosePinentryProcess),
+            mock.patch("sys.stderr", io.StringIO()),
+        ):
+            with self.assertRaisesRegex(geheim.GeheimError, "pinentry closed unexpectedly"):
+                pinentry.password("test", "codex@example.invalid")
+        self.assertEqual(len(EarlyClosePinentryProcess.instances), 2)
+        proc = EarlyClosePinentryProcess.instances[-1]
+        self.assertEqual(proc.bufsize, 0)
+        self.assertTrue(proc.stdin.closed)
+        self.assertTrue(proc.stdout.closed)
+
+    def test_pinentry_empty_response_retries_once_with_note(self):
+        pinentry = geheim.Pinentry(Path("/tmp/pinentry"))
+        stderr = io.StringIO()
+        with (
+            mock.patch.object(
+                geheim.Pinentry,
+                "_exchange",
+                side_effect=[geheim.PinentryRetryableError("pinentry returned no password"), bytearray(b"safe")],
+            ) as exchange,
+            mock.patch("sys.stderr", stderr),
+        ):
+            result = pinentry.password("test", "codex@example.invalid")
+        self.assertEqual(result, bytearray(b"safe"))
+        self.assertEqual(exchange.call_count, 2)
+        self.assertEqual(stderr.getvalue(), "geheim: pinentry returned no password; password cannot be empty, try again.\n")
+        retry_commands = exchange.call_args_list[1].args[0]
+        self.assertIn(b"SETERROR Password cannot be empty. Please try again.", retry_commands)
+
+    def test_pinentry_explicit_empty_password_retries_once(self):
+        pinentry = geheim.Pinentry(Path("/tmp/pinentry"))
+        proc = mock.Mock()
+        proc.stdin = io.BytesIO()
+        proc.stdout = io.BytesIO(b"OK ready\nD \nOK\n")
+        with (
+            mock.patch.object(Path, "is_file", return_value=True),
+            mock.patch.object(geheim.subprocess, "Popen", return_value=proc),
+        ):
+            with self.assertRaisesRegex(geheim.PinentryRetryableError, "pinentry returned no password"):
+                pinentry._exchange([b"GETPIN"], expect_data=True)
+
     def test_missing_message_contains_only_safe_suggestions(self):
         message = geheim.missing_message("GitLab API", ["GitLab API Token", "Grafana API"])
         self.assertIn("Credential \"GitLab API\" is not available.", message)
@@ -139,6 +229,13 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(parser.parse_args(["search", "git"]).query, "git")
         parsed = parser.parse_args(["run", "-e", "TOKEN=GitLab API", "--", "true"])
         self.assertEqual(parsed.mappings, [("TOKEN", "GitLab API")])
+
+    def test_command_preview_summarizes_long_argument(self):
+        preview = geheim.command_preview(["python3", "-c", "x" * 600])
+        self.assertIn("python3 -c", preview)
+        self.assertIn("argument 3 omitted: 600 characters", preview)
+        self.assertIn("command preview shortened", preview)
+        self.assertNotIn("x" * 600, preview)
 
     def test_empty_search_is_explicit(self):
         output = io.StringIO()
