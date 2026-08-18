@@ -20,6 +20,7 @@ class FakeVault:
         self.operation = operation
         self.prompt_details = prompt_details
         self.closed = False
+        self.sync_count = 0
         self.__class__.instances.append(self)
 
     def __enter__(self):
@@ -29,7 +30,7 @@ class FakeVault:
         self.closed = True
 
     def sync(self):
-        pass
+        self.sync_count += 1
 
     def items(self, query=None):
         return [{"id": "test-id", "name": "Disposable Test"}]
@@ -45,6 +46,9 @@ class FakeVault:
 class FakePinentry:
     def __init__(self, path):
         pass
+
+    def password(self, operation, email, details=None):
+        return bytearray(b"correct horse")
 
 
 class EmptyVault(FakeVault):
@@ -64,6 +68,25 @@ class FakeChild:
 
     def poll(self):
         return 0
+
+
+class FakeBwForSetup:
+    instances = []
+
+    def __init__(self, config):
+        self.config = config
+        self.calls = []
+        self.__class__.instances.append(self)
+
+    def lock(self, *, allow_unauthenticated=False):
+        self.calls.append(("lock", allow_unauthenticated))
+        return "unauthenticated"
+
+    def run(self, args, **kwargs):
+        self.calls.append(("run", tuple(args), kwargs.get("session")))
+        if args[:1] == ["login"]:
+            return subprocess.CompletedProcess(args, 0, "setup-session\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
 
 
 class ClosingPipe:
@@ -163,6 +186,23 @@ class BehaviorTests(unittest.TestCase):
         self.assertIn("TEST_SECRET <- Disposable Test", prompt)
         self.assertIn("test -n placeholder", prompt)
         self.assertNotIn("disposable-value-not-printed", prompt)
+        self.assertEqual(FakeVault.instances[-1].sync_count, 0)
+
+    def test_list_uses_cached_vault_without_sync(self):
+        output = io.StringIO()
+        with mock.patch.object(geheim, "VaultOperation", FakeVault), mock.patch("sys.stdout", output):
+            self.assertEqual(geheim.command_list(self.config, "gitlab"), 0)
+        self.assertEqual(output.getvalue(), "Disposable Test\n")
+        self.assertEqual(FakeVault.instances[-1].operation, "search")
+        self.assertEqual(FakeVault.instances[-1].sync_count, 0)
+
+    def test_refresh_syncs_cached_vault_on_demand(self):
+        output = io.StringIO()
+        with mock.patch.object(geheim, "VaultOperation", FakeVault), mock.patch("sys.stdout", output):
+            self.assertEqual(geheim.command_refresh(self.config), 0)
+        self.assertEqual(output.getvalue(), "Credential cache refreshed.\n")
+        self.assertEqual(FakeVault.instances[-1].operation, "refresh")
+        self.assertEqual(FakeVault.instances[-1].sync_count, 1)
 
     def test_run_rejects_obvious_secret_printing_commands_before_vault(self):
         for command in (["echo", "$TEST_SECRET"], ["/usr/bin/echo", "$TEST_SECRET"], ["printenv"]):
@@ -222,10 +262,12 @@ class BehaviorTests(unittest.TestCase):
         message = geheim.missing_message("GitLab API", ["GitLab API Token", "Grafana API"])
         self.assertIn("Credential \"GitLab API\" is not available.", message)
         self.assertIn("GitLab API Token", message)
+        self.assertIn("geheim refresh", message)
 
     def test_public_cli_is_named_geheim(self):
         parser = geheim.build_parser("geheim")
         self.assertEqual(parser.parse_args(["list"]).action, "list")
+        self.assertEqual(parser.parse_args(["refresh"]).action, "refresh")
         self.assertEqual(parser.parse_args(["search", "git"]).query, "git")
         parsed = parser.parse_args(["run", "-e", "TOKEN=GitLab API", "--", "true"])
         self.assertEqual(parsed.mappings, [("TOKEN", "GitLab API")])
@@ -327,6 +369,31 @@ class BehaviorTests(unittest.TestCase):
             geheim.normalize_server_url("https://VAULT.example/base"),
             "https://vault.example/base/",
         )
+
+    def test_setup_logs_in_and_refreshes_initial_cache(self):
+        FakeBwForSetup.instances.clear()
+        with tempfile.TemporaryDirectory() as directory:
+            config_path = Path(directory) / "config.toml"
+            stdout = io.StringIO()
+            with (
+                mock.patch.object(geheim, "Bw", FakeBwForSetup),
+                mock.patch.object(geheim, "Pinentry", FakePinentry),
+                mock.patch.object(geheim, "DEFAULT_BW_DATA", Path(directory) / "bw-data"),
+                mock.patch.object(geheim, "DEFAULT_BW", Path(directory) / "bw"),
+                mock.patch("sys.stdout", stdout),
+            ):
+                self.assertEqual(
+                    geheim.command_setup(
+                        "codex@example.invalid",
+                        False,
+                        "https://vault.example/",
+                        config_path,
+                    ),
+                    0,
+                )
+        bw = FakeBwForSetup.instances[-1]
+        self.assertIn(("run", ("sync",), "setup-session"), bw.calls)
+        self.assertIn("vault cache refreshed and status is locked", stdout.getvalue())
 
 
 if __name__ == "__main__":

@@ -21,13 +21,18 @@ geheim run -e SECRET_ENV_VAR="<secret name>" -- <cli command that needs secret i
 ```bash
 geheim list
 geheim search gitlab
+geheim refresh
 geheim run -e GITLAB_TOKEN="GitLab API" -- glab api /projects
 ```
 
 Each vault operation locks the isolated Bitwarden CLI state, asks for the
 master password through pinentry, unlocks one temporary session, performs one
-operation, and locks again. For `geheim run`, the GUI prompt also shows the
-credential names and command that are being approved.
+operation, and locks again. Setup performs the initial login and vault sync so
+normal `list`, `search`, and `run` operations can use the local encrypted
+Bitwarden cache without refreshing from the network. Use `geheim refresh` when
+you deliberately want to pull updated vault data from Vaultwarden. For
+`geheim run`, the GUI prompt also shows the credential names and command that
+are being approved.
 
 No master password or `BW_SESSION` is persisted. Secret values are not placed
 in argv, files, the caller environment, or wrapper output.
@@ -106,7 +111,7 @@ geheim setup --email USER@example.com --replace --url https://vaultwarden.exampl
 ```
 
 The selected hostname becomes the only network destination available to the
-secret-retrieval component.
+secret-retrieval component. Setup also pulls the initial encrypted vault cache.
 
 ## Usage
 
@@ -120,6 +125,12 @@ Search by name:
 
 ```bash
 geheim search gitlab
+```
+
+Refresh the local encrypted vault cache from Vaultwarden:
+
+```bash
+geheim refresh
 ```
 
 Run a command with one credential injected into the child environment:
@@ -139,7 +150,9 @@ geheim run \
 
 The right side of each mapping is an exact accessible item name or UUID. The
 secret value is the item's Bitwarden login password. Names must be unique; use
-the UUID when duplicate names exist.
+the UUID when duplicate names exist. If an expected credential is not found,
+consider running `geheim refresh` to update the local encrypted vault cache
+before concluding that access is missing.
 
 Use `--timeout SECONDS` to terminate a long-running child process. A timeout
 returns status `124`.

@@ -22,7 +22,7 @@ Use `geheim` as the only interface to the credential store. Treat it as an execu
 
 1. Determine the conventional environment variable expected by the target program, such as `GITLAB_TOKEN` or `API_TOKEN`. Prefer a program that reads the credential directly from its environment.
 2. Run `geheim` commands outside the Codex filesystem sandbox. `geheim` uses local runtime state under paths such as `/run/user/<uid>/geheim`; sandboxed execution can fail before credential lookup with read-only filesystem errors.
-3. Confirm the workstation is on the correct network or tailnet for the configured Vaultwarden host. A wrong tailnet can surface as Vaultwarden TLS or network synchronization failure even when the credential name and password are correct.
+3. For normal lookup and execution, use the local encrypted vault cache. Network access to the configured Vaultwarden host is required for `geheim setup` and explicit `geheim refresh`, not for every `search` or `run` operation.
 4. Search using a short, relevant term:
 
    ```bash
@@ -46,7 +46,8 @@ Use `geheim` as the only interface to the credential store. Treat it as an execu
    ```
 
 8. Add `--timeout SECONDS` before `--` for a command that could hang. Treat exit status `124` as a timeout.
-9. Report the command outcome without exposing the injected environment or sensitive command output.
+9. If item names appear stale, ask the user before running `geheim refresh`; it updates the local cache from Vaultwarden and may require the correct network or tailnet.
+10. Report the command outcome without exposing the injected environment or sensitive command output.
 
 ## Command construction
 
@@ -73,7 +74,7 @@ Do not mention `geheim`, its commands, Vaultwarden, credential item names or UUI
 
 Expect a graphical pinentry prompt. It shows the selected credential names and a bounded preview of the child command; the user approves that one execution by entering the vault password. Pinentry needs an available desktop session; if the desktop session is locked, unlock it before retrying. Do not attempt to bypass, automate, or capture the prompt.
 
-If `geheim search` or `geheim run` fails with a read-only path under `/run/user/<uid>/geheim`, rerun the same command outside the sandbox before changing approach. If synchronization fails with a Vaultwarden TLS or network error, verify the active tailnet/network can reach the configured Vaultwarden host before concluding the token or item is missing.
+If `geheim search` or `geheim run` fails with a read-only path under `/run/user/<uid>/geheim`, rerun the same command outside the sandbox before changing approach. If setup or refresh synchronization fails with a Vaultwarden TLS or network error, verify the active tailnet/network can reach the configured Vaultwarden host before concluding the token or item is missing.
 
 If pinentry returns no password or closes unexpectedly, current `geheim` builds retry the prompt once and print a short note that the password cannot be empty. Do not retry manually in a loop. If search returns no match, refine the query or tell the user that the dedicated Codex Vaultwarden account lacks access. Do not switch to another secret source. If a requested item name is ambiguous, use its UUID. If the user cancels pinentry, authentication fails, or `geheim` reports any other error, stop and report only the sanitized error.
 

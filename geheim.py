@@ -666,6 +666,8 @@ def missing_message(identifier: str, names: Sequence[str]) -> str:
     lines = [
         f'Credential "{identifier}" is not available.', "", "Search accessible credentials with:",
         f"    geheim search {shlex.quote(query)}", "",
+        "If the local cache may be stale, refresh it with:",
+        "    geheim refresh", "",
         "If the credential should be available, grant the configured Codex",
         "Vaultwarden user access to the corresponding item or collection.",
     ]
@@ -712,10 +714,6 @@ def command_list(config: Config, query: str | None) -> int:
     operation = "search" if query is not None else "list"
     with VaultOperation(config, operation) as vault:
         try:
-            vault.sync()
-        except GeheimError as exc:
-            raise GeheimError(f"Credential synchronization failed: {exc}") from exc
-        try:
             names = safe_names(vault.items(query))
         except GeheimError as exc:
             raise GeheimError(f"Credential discovery failed: {exc}") from exc
@@ -741,7 +739,6 @@ def command_run(config: Config, mappings: Sequence[tuple[str, str]], command: Se
     prompt_details = f"Credentials:\n{safe_mappings}\n\nCommand:\n{command_preview(command)}"
     secrets: dict[str, str] = {}
     with VaultOperation(config, "geheim run", prompt_details) as vault:
-        vault.sync()
         all_items = vault.items()
         names = safe_names(all_items)
         resolved: list[tuple[str, dict]] = []
@@ -827,12 +824,15 @@ def command_setup(email: str, replace: bool, url: str | None, config_path: Path)
         and previous.server == server
     )
     if same_account_reset:
-        with VaultOperation(config, "setup verification", setup_details):
-            pass
+        with VaultOperation(config, "setup verification", setup_details) as vault:
+            try:
+                vault.sync()
+            except GeheimError as exc:
+                raise GeheimError(f"Initial credential synchronization failed: {exc}") from exc
         write_config(config, config_path)
         print(
             f"Configured dedicated Vaultwarden account {email} for {server}; "
-            "vault status is locked."
+            "vault cache refreshed and status is locked."
         )
         return 0
     bw = Bw(config)
@@ -857,13 +857,27 @@ def command_setup(email: str, replace: bool, url: str | None, config_path: Path)
                 password[index] = 0
         if not result.stdout.strip():
             raise GeheimError("bw login did not return a temporary session")
+        try:
+            bw.run(["sync"], session=result.stdout.strip())
+        except GeheimError as exc:
+            raise GeheimError(f"Initial credential synchronization failed: {exc}") from exc
     finally:
         bw.lock(allow_unauthenticated=True)
     write_config(config, config_path)
     print(
         f"Configured dedicated Vaultwarden account {email} for {server}; "
-        "vault status is locked."
+        "vault cache refreshed and status is locked."
     )
+    return 0
+
+
+def command_refresh(config: Config) -> int:
+    with VaultOperation(config, "refresh") as vault:
+        try:
+            vault.sync()
+        except GeheimError as exc:
+            raise GeheimError(f"Credential synchronization failed: {exc}") from exc
+    print("Credential cache refreshed.")
     return 0
 
 
@@ -899,6 +913,7 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     setup.add_argument("--replace", action="store_true")
     setup.add_argument("--url")
     sub.add_parser("list")
+    sub.add_parser("refresh")
     search = sub.add_parser("search")
     search.add_argument("query")
     run = sub.add_parser("run")
@@ -949,6 +964,8 @@ def main(argv: Sequence[str] | None = None, *, config_path: Path = DEFAULT_CONFI
         config = Config.load(config_path)
         if args.action in ("list", "search"):
             return command_list(config, args.query if args.action == "search" else None)
+        if args.action == "refresh":
+            return command_refresh(config)
         if args.action == "run":
             command = args.command[1:] if args.command[:1] == ["--"] else args.command
             return command_run(config, args.mappings, command, args.timeout)
