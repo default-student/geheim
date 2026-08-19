@@ -32,7 +32,8 @@ normal `list`, `search`, and `run` operations can use the local encrypted
 Bitwarden cache without refreshing from the network. Use `geheim refresh` when
 you deliberately want to pull updated vault data from Vaultwarden. For
 `geheim run`, the GUI prompt also shows the credential names and command that
-are being approved.
+are being approved. Each vault-affecting command also accepts an optional
+`--reason "short note"` to add a brief approval context to the prompt.
 
 No master password or `BW_SESSION` is persisted. Secret values are not placed
 in argv, files, the caller environment, or wrapper output.
@@ -136,7 +137,7 @@ geheim refresh
 Run a command with one credential injected into the child environment:
 
 ```bash
-geheim run -e GITLAB_TOKEN="GitLab API" -- glab api /projects
+geheim run --reason "deploy check" -e GITLAB_TOKEN="GitLab API" -- glab api /projects
 ```
 
 Resolve multiple credentials in one temporary session:

@@ -25,6 +25,8 @@ from typing import NoReturn, Sequence
 
 
 BW_VERSION = "2026.7.0"
+MAX_REASON_LENGTH = 120
+REASON_HELP = "Very short reason shown in the approval prompt"
 DEFAULT_CONFIG = Path.home() / ".config" / "geheim" / "config.toml"
 DEFAULT_BW_DATA = Path.home() / ".local" / "share" / "geheim" / "bw-data"
 DEFAULT_BW = Path.home() / ".local" / "lib" / "geheim" / f"bw-{BW_VERSION}" / "bw"
@@ -687,6 +689,24 @@ def parse_mapping(value: str) -> tuple[str, str]:
     return name, item
 
 
+def parse_reason(value: str) -> str:
+    reason = value.strip()
+    if not reason:
+        raise argparse.ArgumentTypeError("reason must not be empty")
+    if "\n" in reason or "\r" in reason:
+        raise argparse.ArgumentTypeError("reason must be a single short line")
+    if len(reason) > MAX_REASON_LENGTH:
+        raise argparse.ArgumentTypeError(f"reason must be at most {MAX_REASON_LENGTH} characters")
+    return reason
+
+
+def merge_prompt_details(details: str | None, reason: str | None) -> str | None:
+    parts = [part for part in (details, f"Reason: {reason}" if reason else None) if part]
+    if not parts:
+        return None
+    return "\n\n".join(parts)
+
+
 def validate_child_command(command: Sequence[str]) -> None:
     executable = Path(command[0]).name
     if executable in DENIED_RUN_COMMANDS:
@@ -710,9 +730,9 @@ def command_preview(command: Sequence[str], limit: int = 480) -> str:
     return " ".join(preview) + f" <command preview shortened: {len(rendered)} characters total>"
 
 
-def command_list(config: Config, query: str | None) -> int:
+def command_list(config: Config, query: str | None, reason: str | None) -> int:
     operation = "search" if query is not None else "list"
-    with VaultOperation(config, operation) as vault:
+    with VaultOperation(config, operation, merge_prompt_details(None, reason)) as vault:
         try:
             names = safe_names(vault.items(query))
         except GeheimError as exc:
@@ -727,7 +747,13 @@ def command_list(config: Config, query: str | None) -> int:
     return 0
 
 
-def command_run(config: Config, mappings: Sequence[tuple[str, str]], command: Sequence[str], timeout: float | None) -> int:
+def command_run(
+    config: Config,
+    mappings: Sequence[tuple[str, str]],
+    command: Sequence[str],
+    timeout: float | None,
+    reason: str | None,
+) -> int:
     if not mappings:
         raise GeheimError("geheim run requires at least one -e ENV_VAR=ITEM mapping")
     if not command:
@@ -736,7 +762,10 @@ def command_run(config: Config, mappings: Sequence[tuple[str, str]], command: Se
         raise GeheimError("Each environment variable may be mapped only once")
     validate_child_command(command)
     safe_mappings = "\n".join(f"{name} <- {item}" for name, item in mappings)
-    prompt_details = f"Credentials:\n{safe_mappings}\n\nCommand:\n{command_preview(command)}"
+    prompt_details = merge_prompt_details(
+        f"Credentials:\n{safe_mappings}\n\nCommand:\n{command_preview(command)}",
+        reason,
+    )
     secrets: dict[str, str] = {}
     with VaultOperation(config, "geheim run", prompt_details) as vault:
         all_items = vault.items()
@@ -790,7 +819,7 @@ def command_run(config: Config, mappings: Sequence[tuple[str, str]], command: Se
                 child_env.pop(key, None)
 
 
-def command_setup(email: str, replace: bool, url: str | None, config_path: Path) -> int:
+def command_setup(email: str, replace: bool, url: str | None, config_path: Path, reason: str | None) -> int:
     if url is not None and config_path.exists() and not replace:
         raise GeheimError("--url may only be used together with --replace")
     if config_path.exists() and not replace:
@@ -814,7 +843,7 @@ def command_setup(email: str, replace: bool, url: str | None, config_path: Path)
         bw_version=BW_VERSION,
         network_enforcement="bubblewrap-tailscale",
     )
-    setup_details = f"Remote Vaultwarden:\n{server}"
+    setup_details = merge_prompt_details(f"Remote Vaultwarden:\n{server}", reason)
     config.bw_data_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     os.chmod(config.bw_data_dir, 0o700)
     same_account_reset = (
@@ -871,8 +900,8 @@ def command_setup(email: str, replace: bool, url: str | None, config_path: Path)
     return 0
 
 
-def command_refresh(config: Config) -> int:
-    with VaultOperation(config, "refresh") as vault:
+def command_refresh(config: Config, reason: str | None) -> int:
+    with VaultOperation(config, "refresh", merge_prompt_details(None, reason)) as vault:
         try:
             vault.sync()
         except GeheimError as exc:
@@ -881,12 +910,12 @@ def command_refresh(config: Config) -> int:
     return 0
 
 
-def command_serve_stress(config: Config, query: str, iterations: int) -> int:
+def command_serve_stress(config: Config, query: str, iterations: int, reason: str | None) -> int:
     if iterations < 1 or iterations > 1000:
         raise GeheimError("Serve stress iterations must be between 1 and 1000")
     failures = 0
     started = time.monotonic()
-    with VaultOperation(config, "serve stress test") as vault:
+    with VaultOperation(config, "serve stress test", merge_prompt_details(None, reason)) as vault:
         for index in range(iterations):
             try:
                 if index % 25 == 0:
@@ -912,22 +941,30 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     setup.add_argument("--email", required=True)
     setup.add_argument("--replace", action="store_true")
     setup.add_argument("--url")
-    sub.add_parser("list")
-    sub.add_parser("refresh")
+    setup.add_argument("--reason", type=parse_reason, help=REASON_HELP)
+    list_parser = sub.add_parser("list")
+    list_parser.add_argument("--reason", type=parse_reason, help=REASON_HELP)
+    refresh = sub.add_parser("refresh")
+    refresh.add_argument("--reason", type=parse_reason, help=REASON_HELP)
     search = sub.add_parser("search")
     search.add_argument("query")
+    search.add_argument("--reason", type=parse_reason, help=REASON_HELP)
     run = sub.add_parser("run")
     run.add_argument("-e", "--env", action="append", type=parse_mapping, default=[], dest="mappings")
     run.add_argument("--timeout", type=float)
+    run.add_argument("--reason", type=parse_reason, help=REASON_HELP)
     run.add_argument("command", nargs=argparse.REMAINDER)
     status = sub.add_parser("status")
     status.add_argument("--json", action="store_true")
     status.add_argument("--serve", action="store_true", help=argparse.SUPPRESS)
+    status.add_argument("--reason", type=parse_reason, help=REASON_HELP)
     self_test = sub.add_parser("self-test")
+    self_test.add_argument("--reason", type=parse_reason, help=REASON_HELP)
     self_test_sub = self_test.add_subparsers(dest="test_action", required=True)
     serve_test = self_test_sub.add_parser("serve")
     serve_test.add_argument("--query", default="")
     serve_test.add_argument("--iterations", type=int, default=250)
+    serve_test.add_argument("--reason", type=parse_reason, help=REASON_HELP, dest="serve_reason")
     return parser
 
 
@@ -960,17 +997,18 @@ def main(argv: Sequence[str] | None = None, *, config_path: Path = DEFAULT_CONFI
     args = build_parser(prog).parse_args(argv)
     try:
         if prog == "geheim" and args.action == "setup":
-            return command_setup(args.email, args.replace, args.url, config_path)
+            return command_setup(args.email, args.replace, args.url, config_path, args.reason)
         config = Config.load(config_path)
         if args.action in ("list", "search"):
-            return command_list(config, args.query if args.action == "search" else None)
+            return command_list(config, args.query if args.action == "search" else None, args.reason)
         if args.action == "refresh":
-            return command_refresh(config)
+            return command_refresh(config, args.reason)
         if args.action == "run":
             command = args.command[1:] if args.command[:1] == ["--"] else args.command
-            return command_run(config, args.mappings, command, args.timeout)
+            return command_run(config, args.mappings, command, args.timeout, args.reason)
         if args.action == "self-test" and args.test_action == "serve":
-            return command_serve_stress(config, args.query, args.iterations)
+            reason = getattr(args, "serve_reason", None) or args.reason
+            return command_serve_stress(config, args.query, args.iterations, reason)
         if args.action == "status":
             if args.serve:
                 with BwServeSession(config) as serve:

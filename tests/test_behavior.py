@@ -176,6 +176,7 @@ class BehaviorTests(unittest.TestCase):
                 [("TEST_SECRET", "Disposable Test")],
                 ["test", "-n", "placeholder"],
                 None,
+                "short approval reason",
             )
         self.assertEqual(result, 0)
         self.assertEqual(stdout.getvalue(), "")
@@ -185,13 +186,14 @@ class BehaviorTests(unittest.TestCase):
         prompt = FakeVault.instances[-1].prompt_details
         self.assertIn("TEST_SECRET <- Disposable Test", prompt)
         self.assertIn("test -n placeholder", prompt)
+        self.assertIn("Reason: short approval reason", prompt)
         self.assertNotIn("disposable-value-not-printed", prompt)
         self.assertEqual(FakeVault.instances[-1].sync_count, 0)
 
     def test_list_uses_cached_vault_without_sync(self):
         output = io.StringIO()
         with mock.patch.object(geheim, "VaultOperation", FakeVault), mock.patch("sys.stdout", output):
-            self.assertEqual(geheim.command_list(self.config, "gitlab"), 0)
+            self.assertEqual(geheim.command_list(self.config, "gitlab", None), 0)
         self.assertEqual(output.getvalue(), "Disposable Test\n")
         self.assertEqual(FakeVault.instances[-1].operation, "search")
         self.assertEqual(FakeVault.instances[-1].sync_count, 0)
@@ -199,7 +201,7 @@ class BehaviorTests(unittest.TestCase):
     def test_refresh_syncs_cached_vault_on_demand(self):
         output = io.StringIO()
         with mock.patch.object(geheim, "VaultOperation", FakeVault), mock.patch("sys.stdout", output):
-            self.assertEqual(geheim.command_refresh(self.config), 0)
+            self.assertEqual(geheim.command_refresh(self.config, None), 0)
         self.assertEqual(output.getvalue(), "Credential cache refreshed.\n")
         self.assertEqual(FakeVault.instances[-1].operation, "refresh")
         self.assertEqual(FakeVault.instances[-1].sync_count, 1)
@@ -209,7 +211,7 @@ class BehaviorTests(unittest.TestCase):
             with self.subTest(command=command):
                 FakeVault.instances.clear()
                 with self.assertRaisesRegex(geheim.GeheimError, "Refusing to run"):
-                    geheim.command_run(self.config, [("TEST_SECRET", "Disposable Test")], command, None)
+                    geheim.command_run(self.config, [("TEST_SECRET", "Disposable Test")], command, None, None)
                 self.assertEqual(FakeVault.instances, [])
 
     def test_pinentry_early_close_is_cleaned_up(self):
@@ -282,19 +284,19 @@ class BehaviorTests(unittest.TestCase):
     def test_empty_search_is_explicit(self):
         output = io.StringIO()
         with mock.patch.object(geheim, "VaultOperation", EmptyVault), mock.patch("sys.stdout", output):
-            self.assertEqual(geheim.command_list(self.config, "gitlab"), 0)
+            self.assertEqual(geheim.command_list(self.config, "gitlab", None), 0)
         self.assertEqual(output.getvalue(), 'No accessible credentials matched "gitlab".\n')
 
     def test_empty_list_is_explicit(self):
         output = io.StringIO()
         with mock.patch.object(geheim, "VaultOperation", EmptyVault), mock.patch("sys.stdout", output):
-            self.assertEqual(geheim.command_list(self.config, None), 0)
+            self.assertEqual(geheim.command_list(self.config, None, None), 0)
         self.assertEqual(output.getvalue(), "No accessible credentials are available.\n")
 
     def test_serve_stress_outputs_counts_not_items(self):
         output = io.StringIO()
         with mock.patch.object(geheim, "VaultOperation", EmptyVault), mock.patch("sys.stdout", output):
-            self.assertEqual(geheim.command_serve_stress(self.config, "gitlab", 3), 0)
+            self.assertEqual(geheim.command_serve_stress(self.config, "gitlab", 3, None), 0)
         result = output.getvalue()
         self.assertIn("serve_requests=3", result)
         self.assertIn("serve_failures=0", result)
@@ -341,13 +343,13 @@ class BehaviorTests(unittest.TestCase):
             )
             geheim.write_config(config, config_path)
             with self.assertRaisesRegex(geheim.GeheimError, "https://vault.example/"):
-                geheim.command_setup("codex@example.invalid", False, None, config_path)
+                geheim.command_setup("codex@example.invalid", False, None, config_path, None)
 
     def test_new_setup_requires_url(self):
         with tempfile.TemporaryDirectory() as directory:
             config_path = Path(directory) / "config.toml"
             with self.assertRaisesRegex(geheim.GeheimError, "--url"):
-                geheim.command_setup("codex@example.invalid", False, None, config_path)
+                geheim.command_setup("codex@example.invalid", False, None, config_path, None)
 
     def test_url_change_requires_replace_and_https(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -362,7 +364,7 @@ class BehaviorTests(unittest.TestCase):
             )
             geheim.write_config(config, config_path)
             with self.assertRaisesRegex(geheim.GeheimError, "--replace"):
-                geheim.command_setup("codex@example.invalid", False, "https://other-vault.example/", config_path)
+                geheim.command_setup("codex@example.invalid", False, "https://other-vault.example/", config_path, None)
         with self.assertRaises(geheim.GeheimError):
             geheim.normalize_server_url("http://vault.example/")
         self.assertEqual(
@@ -388,12 +390,26 @@ class BehaviorTests(unittest.TestCase):
                         False,
                         "https://vault.example/",
                         config_path,
+                        None,
                     ),
                     0,
                 )
         bw = FakeBwForSetup.instances[-1]
         self.assertIn(("run", ("sync",), "setup-session"), bw.calls)
         self.assertIn("vault cache refreshed and status is locked", stdout.getvalue())
+
+    def test_parser_accepts_reason_on_multiple_commands(self):
+        parser = geheim.build_parser("geheim")
+        self.assertEqual(parser.parse_args(["list", "--reason", "approval note"]).reason, "approval note")
+        self.assertEqual(
+            parser.parse_args(["run", "--reason", "approval note", "-e", "TOKEN=GitLab API", "--", "true"]).reason,
+            "approval note",
+        )
+        self.assertEqual(parser.parse_args(["self-test", "--reason", "approval note", "serve"]).reason, "approval note")
+        self.assertEqual(
+            parser.parse_args(["self-test", "serve", "--reason", "approval note"]).serve_reason,
+            "approval note",
+        )
 
 
 if __name__ == "__main__":
