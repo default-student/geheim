@@ -20,23 +20,26 @@ Use `geheim` as the only interface to the credential store. Treat it as an execu
 
 ## Workflow
 
-1. Determine the conventional environment variable expected by the target program, such as `GITLAB_TOKEN` or `API_TOKEN`. Prefer a program that reads the credential directly from its environment.
-2. Run `geheim` commands outside the Codex filesystem sandbox. `geheim` uses local runtime state under paths such as `/run/user/<uid>/geheim`; sandboxed execution can fail before credential lookup with read-only filesystem errors.
-3. For normal lookup and execution, use the local encrypted vault cache. Network access to the configured Vaultwarden host is required for `geheim setup` and explicit `geheim refresh`, not for every `search` or `run` operation.
-4. Search using a short, relevant term:
+1. Before using credentials, verify the CLI is available with `command -v geheim`.
+2. If `geheim` is missing and the current repository contains `scripts/install.sh` and `geheim.py`, run `scripts/install.sh` outside the Codex filesystem sandbox. The installer downloads the pinned Bitwarden CLI and installs `geheim` into `~/.local/bin`; it does not configure an account or retrieve secrets.
+3. After installation, verify `command -v geheim` again. If `~/.local/bin` is not in the active `PATH`, use the absolute path `~/.local/bin/geheim` for the current command and tell the user their shell path needs that directory.
+4. Determine the conventional environment variable expected by the target program, such as `GITLAB_TOKEN` or `API_TOKEN`. Prefer a program that reads the credential directly from its environment.
+5. Run `geheim` commands outside the Codex filesystem sandbox. `geheim` uses local runtime state under paths such as `/run/user/<uid>/geheim`; sandboxed execution can fail before credential lookup with read-only filesystem errors.
+6. For normal lookup and execution, use the local encrypted vault cache. Network access to the configured Vaultwarden host is required for `geheim setup` and explicit `geheim refresh`, not for every `search` or `run` operation.
+7. Search using a short, relevant term:
 
    ```bash
    geheim search gitlab
    ```
 
-5. Select an exact returned item name. If names are duplicated, use the item UUID indicated by `geheim`; do not guess.
-6. Run the narrowest required command:
+8. Select an exact returned item name. If names are duplicated, use the item UUID indicated by `geheim`; do not guess.
+9. Run the narrowest required command:
 
    ```bash
    geheim run -e GITLAB_TOKEN="GitLab API" -- glab api /projects
    ```
 
-7. For multiple credentials, map each variable in the same invocation so they are resolved in one temporary session:
+10. For multiple credentials, map each variable in the same invocation so they are resolved in one temporary session:
 
    ```bash
    geheim run \
@@ -45,9 +48,9 @@ Use `geheim` as the only interface to the credential store. Treat it as an execu
      -- ./migration
    ```
 
-8. Add `--timeout SECONDS` before `--` for a command that could hang. Treat exit status `124` as a timeout.
-9. If item names appear stale, ask the user before running `geheim refresh`; it updates the local cache from Vaultwarden and may require the correct network or tailnet.
-10. Report the command outcome without exposing the injected environment or sensitive command output.
+11. Add `--timeout SECONDS` before `--` for a command that could hang. Treat exit status `124` as a timeout.
+12. If item names appear stale, ask the user before running `geheim refresh`; it updates the local cache from Vaultwarden and may require the correct network or tailnet.
+13. Report the command outcome without exposing the injected environment or sensitive command output.
 
 ## Command construction
 

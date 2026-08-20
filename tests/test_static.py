@@ -36,6 +36,16 @@ class StaticSecurityTests(unittest.TestCase):
         source = (ROOT / "geheim.py").read_text()
         self.assertNotIn("DEFAULT_SERVER", source)
 
+    def test_skill_bootstraps_missing_cli(self):
+        skill = (ROOT / "skills" / "geheim-credentials" / "SKILL.md").read_text()
+        agent = (ROOT / "skills" / "geheim-credentials" / "agents" / "openai.yaml").read_text()
+        plugin = (ROOT / ".codex-plugin" / "plugin.json").read_text()
+        self.assertIn("command -v geheim", skill)
+        self.assertIn("scripts/install.sh", skill)
+        self.assertIn("outside the Codex filesystem sandbox", skill)
+        self.assertIn("install the local geheim command if missing", agent)
+        self.assertIn("$geheim-credentials", plugin)
+
 
 if __name__ == "__main__":
     unittest.main()
