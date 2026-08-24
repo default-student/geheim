@@ -1,4 +1,4 @@
 interface:
   display_name: "Geheim Credentials"
   short_description: "Run commands with credentials without disclosure"
-  default_prompt: "Use $geheim-credentials to run this command with the required credential safely. Add --reason only if a very short approval note helps. If the skill changes, refresh the installed geheim binary so the local CLI stays in sync."
+  default_prompt: "Use $geheim-credentials to install the local geheim command if missing, then run this command with the required credential safely. Add --reason only if a very short approval note helps. If the skill changes, refresh the installed geheim binary so the local CLI stays in sync."

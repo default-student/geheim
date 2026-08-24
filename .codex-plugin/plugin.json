@@ -23,7 +23,7 @@
       "Local commands"
     ],
     "defaultPrompt": [
-      "Use Geheim Credentials to run this command safely."
+      "Use $geheim-credentials to install the local geheim command if missing, then run this command safely."
     ]
   }
 }
