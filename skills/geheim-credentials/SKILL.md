@@ -36,6 +36,9 @@ Use `geheim` as the only interface to the credential store. Treat it as an execu
    geheim run -e GITLAB_TOKEN="GitLab API" -- glab api /projects
    ```
 
+   If the user wants a very short approval note, add `--reason "short note"` to
+   the `geheim` command. Keep it single-line and brief.
+
 7. For multiple credentials, map each variable in the same invocation so they are resolved in one temporary session:
 
    ```bash
