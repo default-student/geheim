@@ -126,7 +126,15 @@ Search by name:
 
 ```bash
 geheim search gitlab
+geheim search gitlab grafana database
+geheim search "gitlab token" grafana
 ```
+
+Pass multiple search terms together when discovering several possible
+credentials. They are handled in one vault operation, so the password prompt
+appears once and shows all terms being searched. Avoid looping over separate
+`geheim search` commands. Quote a single term containing spaces, such as
+`"gitlab token"`.
 
 Refresh the local encrypted vault cache from Vaultwarden:
 

@@ -730,20 +730,34 @@ def command_preview(command: Sequence[str], limit: int = 480) -> str:
     return " ".join(preview) + f" <command preview shortened: {len(rendered)} characters total>"
 
 
-def command_list(config: Config, query: str | None, reason: str | None) -> int:
-    operation = "search" if query is not None else "list"
-    with VaultOperation(config, operation, merge_prompt_details(None, reason)) as vault:
+def command_list(config: Config, query: str | Sequence[str] | None, reason: str | None) -> int:
+    queries = [query] if isinstance(query, str) else list(query or [])
+    operation = "search" if queries else "list"
+    details = None
+    if queries:
+        details = "Searches:\n" + "\n".join(f"  {term}" for term in queries)
+    with VaultOperation(config, operation, merge_prompt_details(details, reason)) as vault:
         try:
-            names = safe_names(vault.items(query))
+            if queries:
+                matched_items: dict[str, dict] = {}
+                for term in queries:
+                    for item in vault.items(term):
+                        item_id = str(item.get("id", ""))
+                        if item_id:
+                            matched_items[item_id] = item
+                names = safe_names(list(matched_items.values()))
+            else:
+                names = safe_names(vault.items())
         except GeheimError as exc:
             raise GeheimError(f"Credential discovery failed: {exc}") from exc
     for name in names:
         print(name)
     if not names:
-        if query is None:
+        if not queries:
             print("No accessible credentials are available.")
         else:
-            print(f'No accessible credentials matched "{query}".')
+            rendered_queries = ", ".join(f'"{term}"' for term in queries)
+            print(f"No accessible credentials matched {rendered_queries}.")
     return 0
 
 
@@ -947,7 +961,7 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     refresh = sub.add_parser("refresh")
     refresh.add_argument("--reason", type=parse_reason, help=REASON_HELP)
     search = sub.add_parser("search")
-    search.add_argument("query")
+    search.add_argument("queries", nargs="+")
     search.add_argument("--reason", type=parse_reason, help=REASON_HELP)
     run = sub.add_parser("run")
     run.add_argument("-e", "--env", action="append", type=parse_mapping, default=[], dest="mappings")
@@ -1000,7 +1014,7 @@ def main(argv: Sequence[str] | None = None, *, config_path: Path = DEFAULT_CONFI
             return command_setup(args.email, args.replace, args.url, config_path, args.reason)
         config = Config.load(config_path)
         if args.action in ("list", "search"):
-            return command_list(config, args.query if args.action == "search" else None, args.reason)
+            return command_list(config, args.queries if args.action == "search" else None, args.reason)
         if args.action == "refresh":
             return command_refresh(config, args.reason)
         if args.action == "run":

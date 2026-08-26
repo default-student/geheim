@@ -26,11 +26,19 @@ Use `geheim` as the only interface to the credential store. Treat it as an execu
 4. Determine the conventional environment variable expected by the target program, such as `GITLAB_TOKEN` or `API_TOKEN`. Prefer a program that reads the credential directly from its environment.
 5. Run `geheim` commands outside the Codex filesystem sandbox. `geheim` uses local runtime state under paths such as `/run/user/<uid>/geheim`; sandboxed execution can fail before credential lookup with read-only filesystem errors.
 6. For normal lookup and execution, use the local encrypted vault cache. Network access to the configured Vaultwarden host is required for `geheim setup` and explicit `geheim refresh`, not for every `search` or `run` operation.
-7. Search using a short, relevant term:
+7. Search using one or more short, relevant terms. Batch all terms needed for
+   the current discovery task into one command so the vault is unlocked only
+   once. The pinentry prompt shows every term being searched:
 
    ```bash
    geheim search gitlab
+   geheim search gitlab grafana database
+   geheim search "gitlab token" grafana
    ```
+
+   Do not call `geheim search` once per guessed term. If you need several
+   searches, pass the terms together as positional arguments. Quote any
+   single term that contains spaces.
 
 8. Select an exact returned item name. If names are duplicated, use the item UUID indicated by `geheim`; do not guess.
 9. Run the narrowest required command:

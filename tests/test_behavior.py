@@ -198,6 +198,15 @@ class BehaviorTests(unittest.TestCase):
         self.assertEqual(FakeVault.instances[-1].operation, "search")
         self.assertEqual(FakeVault.instances[-1].sync_count, 0)
 
+    def test_search_batches_terms_under_one_unlock_and_shows_them_in_prompt(self):
+        output = io.StringIO()
+        with mock.patch.object(geheim, "VaultOperation", FakeVault), mock.patch("sys.stdout", output):
+            self.assertEqual(geheim.command_list(self.config, ["gitlab", "grafana"], None), 0)
+        self.assertEqual(output.getvalue(), "Disposable Test\n")
+        self.assertEqual(len(FakeVault.instances), 1)
+        prompt = FakeVault.instances[-1].prompt_details
+        self.assertIn("Searches:\n  gitlab\n  grafana", prompt)
+
     def test_refresh_syncs_cached_vault_on_demand(self):
         output = io.StringIO()
         with mock.patch.object(geheim, "VaultOperation", FakeVault), mock.patch("sys.stdout", output):
@@ -270,7 +279,9 @@ class BehaviorTests(unittest.TestCase):
         parser = geheim.build_parser("geheim")
         self.assertEqual(parser.parse_args(["list"]).action, "list")
         self.assertEqual(parser.parse_args(["refresh"]).action, "refresh")
-        self.assertEqual(parser.parse_args(["search", "git"]).query, "git")
+        self.assertEqual(parser.parse_args(["search", "git"]).queries, ["git"])
+        self.assertEqual(parser.parse_args(["search", "git", "grafana"]).queries, ["git", "grafana"])
+        self.assertEqual(parser.parse_args(["search", "gitlab token", "grafana"]).queries, ["gitlab token", "grafana"])
         parsed = parser.parse_args(["run", "-e", "TOKEN=GitLab API", "--", "true"])
         self.assertEqual(parsed.mappings, [("TOKEN", "GitLab API")])
 

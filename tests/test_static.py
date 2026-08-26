@@ -43,6 +43,7 @@ class StaticSecurityTests(unittest.TestCase):
         self.assertIn("command -v geheim", skill)
         self.assertIn("scripts/install.sh", skill)
         self.assertIn("outside the Codex filesystem sandbox", skill)
+        self.assertIn("pass the terms together as positional arguments", skill)
         self.assertIn("install the local geheim command if missing", agent)
         self.assertIn("$geheim-credentials", plugin)
 
